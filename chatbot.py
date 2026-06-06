@@ -3,6 +3,7 @@ from datetime import date
 
 import database as db
 from config import MENSAJES, NEGOCIO
+from rate_limiter import is_rate_limited
 
 # Estados de conversación
 IDLE = "IDLE"
@@ -30,7 +31,13 @@ def _get_session(user_id: str) -> dict:
 
 def handle_message(canal: str, canal_user_id: str, text: str) -> str:
     """Procesa un mensaje y retorna la respuesta del bot."""
+    if is_rate_limited(canal_user_id):
+        return "⚠️ Estás enviando mensajes muy rápido. Espera un momento e intenta de nuevo."
     text = text.strip()
+    # Sanitización: limitar largo y limpiar
+    if len(text) > 500:
+        text = text[:500]
+    text = text.replace("\x00", "")  # Null bytes
     session = _get_session(canal_user_id)
     state = session["state"]
 

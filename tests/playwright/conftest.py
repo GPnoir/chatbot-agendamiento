@@ -90,6 +90,10 @@ def api_context(
 
 @pytest.fixture(autouse=True)
 def clear_responses():
+    import rate_limiter
+    import chatbot as chatbot_module
     chatbot_responses.clear()
+    rate_limiter.reset()
+    chatbot_module._sessions.clear()
     yield
     chatbot_responses.clear()

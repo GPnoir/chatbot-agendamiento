@@ -49,10 +49,12 @@ def fresh_db(temp_db_path: Path):
 
 @pytest.fixture(autouse=True)
 def clear_chatbot_sessions():
-    """Limpia sesiones del chatbot entre tests."""
+    """Limpia sesiones del chatbot y rate limiter entre tests."""
     import chatbot as chatbot_module
+    import rate_limiter
 
     chatbot_module._sessions.clear()
+    rate_limiter.reset()
     yield
 
 

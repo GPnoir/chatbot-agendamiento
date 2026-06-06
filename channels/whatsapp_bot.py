@@ -1,12 +1,25 @@
 """Adaptador para WhatsApp via Meta Cloud API."""
+import hashlib
+import hmac
+
 import httpx
 from fastapi import APIRouter, Request, Response
 
 import chatbot
-from config import WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN
+from config import WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET
 
 router = APIRouter(prefix="/whatsapp")
 META_API_URL = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+
+
+def verify_signature(payload: bytes, signature: str) -> bool:
+    """Verifica X-Hub-Signature-256 con el App Secret."""
+    if not WHATSAPP_APP_SECRET:
+        return True  # Skip si no está configurado (desarrollo)
+    expected = "sha256=" + hmac.new(
+        WHATSAPP_APP_SECRET.encode(), payload, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
 
 
 async def send_message(to: str, text: str):
@@ -36,9 +49,14 @@ async def verify_webhook(request: Request):
 @router.post("/webhook")
 async def receive_message(request: Request):
     """Recibe mensajes de WhatsApp."""
-    body = await request.json()
+    body = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256", "")
+    if not verify_signature(body, signature):
+        return Response(status_code=403)
     try:
-        entry = body["entry"][0]
+        import json
+        data = json.loads(body)
+        entry = data["entry"][0]
         changes = entry["changes"][0]
         value = changes["value"]
         if "messages" not in value:
@@ -50,6 +68,6 @@ async def receive_message(request: Request):
         text = message["text"]["body"]
         response = chatbot.handle_message("whatsapp", from_number, text)
         await send_message(from_number, response)
-    except (KeyError, IndexError):
+    except (KeyError, IndexError, ValueError):
         pass
     return {"status": "ok"}
