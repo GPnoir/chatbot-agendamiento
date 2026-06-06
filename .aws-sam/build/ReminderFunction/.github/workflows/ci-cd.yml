@@ -1,0 +1,103 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Tests
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        run: |
+          python3 --version
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+
+      - name: Install dependencies
+        run: |
+          source .venv/bin/activate
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run unit & integration tests
+        run: |
+          source .venv/bin/activate
+          pytest tests/test_chatbot_unit.py tests/test_database_unit.py tests/test_server_integration.py tests/test_security_and_overlap.py -v --tb=short
+
+      - name: Run Playwright E2E tests
+        run: |
+          source .venv/bin/activate
+          pytest tests/playwright/ -v --tb=short
+
+      - name: Check syntax (all Python files)
+        run: |
+          source .venv/bin/activate
+          python3 -m py_compile config.py
+          python3 -m py_compile database.py
+          python3 -m py_compile chatbot.py
+          python3 -m py_compile lambda_handler.py
+          python3 -m py_compile database_dynamo.py
+          python3 -m py_compile session_store.py
+          python3 -m py_compile chatbot_lambda.py
+
+  deploy:
+    name: Deploy to AWS Lambda
+    runs-on: self-hosted
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SAM Build
+        run: sam build --template-file template.yaml
+
+      - name: SAM Deploy
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+        run: |
+          sam deploy \
+            --stack-name chatbot-agendamiento \
+            --region us-east-1 \
+            --capabilities CAPABILITY_IAM \
+            --resolve-s3 \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "TelegramBotToken=${{ secrets.TELEGRAM_BOT_TOKEN }}" \
+              "TelegramWebhookSecret=${{ secrets.TELEGRAM_WEBHOOK_SECRET }}" \
+              "WhatsAppToken=${{ secrets.WHATSAPP_TOKEN }}" \
+              "WhatsAppPhoneNumberId=${{ secrets.WHATSAPP_PHONE_NUMBER_ID }}" \
+              "WhatsAppVerifyToken=${{ secrets.WHATSAPP_VERIFY_TOKEN }}" \
+              "WhatsAppAppSecret=${{ secrets.WHATSAPP_APP_SECRET }}"
+
+      - name: Configure Telegram Webhook
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+        run: |
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name chatbot-agendamiento \
+            --region us-east-1 \
+            --query 'Stacks[0].Outputs[?OutputKey==`TelegramWebhookUrl`].OutputValue' \
+            --output text)
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=${API_URL}&secret_token=${TELEGRAM_WEBHOOK_SECRET}"
+
+      - name: Smoke test
+        run: |
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name chatbot-agendamiento \
+            --region us-east-1 \
+            --query 'Stacks[0].Outputs[?OutputKey==`ApiUrl`].OutputValue' \
+            --output text)
+          RESPONSE=$(curl -s "${API_URL}/health")
+          echo "$RESPONSE"
+          echo "$RESPONSE" | grep -q '"status":"ok"' || exit 1
