@@ -22,12 +22,10 @@ META_API_URL = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/mes
 
 
 # ── Startup ───────────────────────────────────────────────────────────
-@app.on_event("startup")
-async def startup():
-    db.init_db()
+# Init on cold start (lifespan="off" means on_event startup doesn't run)
+db.init_db()
 
 
-# ── Health ────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "chatbot-agendamiento", "runtime": "lambda"}
@@ -81,26 +79,47 @@ async def whatsapp_message(request: Request):
 # ── Telegram ──────────────────────────────────────────────────────────
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
+    import logging
+    logger = logging.getLogger()
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
     if secret != TELEGRAM_WEBHOOK_SECRET:
+        logger.info(f"Telegram: secret mismatch, got='{secret[:10]}...'")
         return JSONResponse(status_code=403, content={"error": "forbidden"})
     data = await request.json()
     try:
         msg = data.get("message", {})
+        if not msg:
+            logger.info("Telegram: no message in update")
+            return {"status": "ok"}
         text = msg.get("text", "")
         user_id = str(msg["from"]["id"])
+        chat_id = msg["chat"]["id"]
+        logger.info(f"Telegram: user={user_id} text='{text}' chat={chat_id}")
         if not text:
             return {"status": "ok"}
         response = chatbot.handle_message("telegram", user_id, text)
-        # Responder via Telegram API
+        logger.info(f"Telegram: response='{response[:80]}...'")
         from config import TELEGRAM_BOT_TOKEN
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        async with httpx.AsyncClient() as client:
-            await client.post(url, json={"chat_id": msg["chat"]["id"], "text": response})
-    except (KeyError, TypeError):
-        pass
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(url, json={"chat_id": chat_id, "text": response})
+            logger.info(f"Telegram: sendMessage status={r.status_code}")
+    except (KeyError, TypeError) as e:
+        logger.error(f"Telegram: error {e}")
     return {"status": "ok"}
 
 
 # ── Mangum handler ────────────────────────────────────────────────────
-handler = Mangum(app, lifespan="off")
+_mangum = Mangum(app, lifespan="off")
+
+
+def handler(event, context):
+    """Lambda entry point - maneja tanto API Gateway como EventBridge warm-up."""
+    import logging
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.info(f"Event keys: {list(event.keys())}")
+    # EventBridge warm-up o evento no-HTTP
+    if "httpMethod" not in event and "requestContext" not in event:
+        return {"statusCode": 200, "body": "warm"}
+    return _mangum(event, context)

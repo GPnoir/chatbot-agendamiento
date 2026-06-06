@@ -22,10 +22,13 @@ def _get_table():
 
 
 def _serialize(data: dict) -> str:
-    """Serializa data de sesión (convierte date a string)."""
+    """Serializa data de sesión (convierte date y Decimal a tipos JSON)."""
+    from decimal import Decimal
     def default(obj):
         if isinstance(obj, date):
             return {"__date__": obj.isoformat()}
+        if isinstance(obj, Decimal):
+            return int(obj) if obj == int(obj) else float(obj)
         raise TypeError(f"Not serializable: {type(obj)}")
     return json.dumps(data, default=default)
 

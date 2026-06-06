@@ -110,7 +110,7 @@ def get_or_create_cliente(canal: str, canal_user_id: str, nombre: str = None):
 
 
 def get_horas_disponibles(profesional_id: int, fecha: date, servicio_duracion: int) -> list[str]:
-    """Retorna lista de horas disponibles para un profesional en una fecha."""
+    """Retorna lista de horas disponibles para un profesional en una fecha, validando solapamiento."""
     dia_semana = fecha.weekday()
     conn = get_db()
     horario = conn.execute(
@@ -121,25 +121,38 @@ def get_horas_disponibles(profesional_id: int, fecha: date, servicio_duracion: i
         conn.close()
         return []
 
-    # Citas ya agendadas ese día
+    # Citas ya agendadas ese día con su duración
     citas = conn.execute(
-        "SELECT hora FROM citas WHERE profesional_id = ? AND fecha = ? AND estado = 'confirmada'",
+        """SELECT c.hora, s.duracion_min FROM citas c
+           JOIN servicios s ON c.servicio_id = s.id
+           WHERE c.profesional_id = ? AND c.fecha = ? AND c.estado = 'confirmada'""",
         (profesional_id, fecha.isoformat())
     ).fetchall()
     conn.close()
-    horas_ocupadas = {r["hora"] for r in citas}
 
-    # Generar slots
+    # Construir bloques ocupados (inicio_min, fin_min)
+    bloques_ocupados = []
+    for cita in citas:
+        h, m = map(int, cita["hora"].split(":"))
+        inicio_min = h * 60 + m
+        bloques_ocupados.append((inicio_min, inicio_min + cita["duracion_min"]))
+
+    # Generar slots cada 30 min y verificar solapamiento
     inicio = datetime.strptime(horario["hora_inicio"], "%H:%M")
     fin = datetime.strptime(horario["hora_fin"], "%H:%M")
-    slot_dur = timedelta(minutes=servicio_duracion)
     disponibles = []
     current = inicio
-    while current + slot_dur <= fin:
+    while current + timedelta(minutes=servicio_duracion) <= fin:
         hora_str = current.strftime("%H:%M")
-        if hora_str not in horas_ocupadas:
+        slot_inicio = current.hour * 60 + current.minute
+        slot_fin = slot_inicio + servicio_duracion
+        solapa = any(
+            slot_inicio < ocu_fin and slot_fin > ocu_inicio
+            for ocu_inicio, ocu_fin in bloques_ocupados
+        )
+        if not solapa:
             disponibles.append(hora_str)
-        current += slot_dur
+        current += timedelta(minutes=30)
     return disponibles
 
 

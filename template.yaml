@@ -6,7 +6,7 @@ Globals:
   Function:
     Timeout: 15
     MemorySize: 256
-    Runtime: python3.12
+    Runtime: python3.11
     Environment:
       Variables:
         DYNAMODB_TABLE: !Ref ChatbotTable
@@ -114,7 +114,7 @@ Resources:
       Targets:
         - Id: WarmUpTarget
           Arn: !GetAtt ChatbotFunction.Arn
-          Input: '{"httpMethod":"GET","path":"/health","requestContext":{"stage":"Prod"},"headers":{},"queryStringParameters":null,"body":null}'
+          Input: '{"resource":"/health","path":"/health","httpMethod":"GET","headers":{},"multiValueHeaders":{},"queryStringParameters":null,"multiValueQueryStringParameters":null,"pathParameters":null,"stageVariables":null,"requestContext":{"stage":"Prod","resourcePath":"/health","httpMethod":"GET"},"body":null,"isBase64Encoded":false}'
 
   WarmUpPermission:
     Type: AWS::Lambda::Permission

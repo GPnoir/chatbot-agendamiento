@@ -97,7 +97,7 @@ def get_or_create_cliente(canal: str, canal_user_id: str, nombre: str = None) ->
 
 
 def get_horas_disponibles(profesional_id: int, fecha: date, servicio_duracion: int) -> list[str]:
-    """Retorna horas disponibles para un profesional en una fecha."""
+    """Retorna horas disponibles para un profesional en una fecha, validando solapamiento."""
     table = get_table()
     dia_semana = fecha.weekday()
     # Obtener horario
@@ -106,16 +106,22 @@ def get_horas_disponibles(profesional_id: int, fecha: date, servicio_duracion: i
         return []
     horario = resp["Item"]
 
-    # Obtener citas existentes ese día
+    # Obtener citas existentes ese día (con duración)
     fecha_str = fecha.isoformat()
     citas_resp = table.query(
         IndexName="GSI1",
         KeyConditionExpression=Key("GSI1PK").eq(f"APPT#PROF#{profesional_id}") & Key("GSI1SK").begins_with(f"DATE#{fecha_str}"),
         FilterExpression=Attr("estado").eq("confirmada"),
     )
-    horas_ocupadas = {item["hora"] for item in citas_resp["Items"]}
+    # Construir bloques ocupados (inicio, fin) en minutos desde 00:00
+    bloques_ocupados = []
+    for item in citas_resp["Items"]:
+        h, m = map(int, item["hora"].split(":"))
+        inicio_min = h * 60 + m
+        dur = int(item.get("servicio_duracion", 60))
+        bloques_ocupados.append((inicio_min, inicio_min + dur))
 
-    # Generar slots
+    # Generar slots y verificar solapamiento
     inicio = datetime.strptime(horario["hora_inicio"], "%H:%M")
     fin = datetime.strptime(horario["hora_fin"], "%H:%M")
     slot_dur = timedelta(minutes=servicio_duracion)
@@ -123,9 +129,17 @@ def get_horas_disponibles(profesional_id: int, fecha: date, servicio_duracion: i
     current = inicio
     while current + slot_dur <= fin:
         hora_str = current.strftime("%H:%M")
-        if hora_str not in horas_ocupadas:
+        h, m = current.hour, current.minute
+        slot_inicio = h * 60 + m
+        slot_fin = slot_inicio + servicio_duracion
+        # Verificar que no se solape con ninguna cita existente
+        solapa = any(
+            slot_inicio < ocu_fin and slot_fin > ocu_inicio
+            for ocu_inicio, ocu_fin in bloques_ocupados
+        )
+        if not solapa:
             disponibles.append(hora_str)
-        current += slot_dur
+        current += timedelta(minutes=30)  # Slots cada 30 min
     return disponibles
 
 
@@ -157,11 +171,12 @@ def crear_cita(cliente_id: str, servicio_id: int, profesional_id: int, fecha: st
         "created_at": datetime.utcnow().isoformat(),
         "updated_at": datetime.utcnow().isoformat(),
     }
-    # Agregar nombres para lectura fácil
+    # Agregar nombres y duración para lectura fácil
     servicios = get_servicios()
     serv = next((s for s in servicios if s["id"] == servicio_id), None)
     if serv:
         item["servicio_nombre"] = serv["nombre"]
+        item["servicio_duracion"] = serv["duracion_min"]
     profesionales = get_profesionales()
     prof = next((p for p in profesionales if p["id"] == profesional_id), None)
     if prof:

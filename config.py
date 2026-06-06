@@ -34,7 +34,7 @@ SERVICIOS = [
 ]
 
 PROFESIONALES = [
-    {"nombre": "Dra. María López", "especialidad": "Terapeuta floral"},
+    {"nombre": "Terapeuta Nelly Pailacura", "especialidad": "Terapeuta floral"},
 ]
 
 HORARIOS_DEFAULT = {
