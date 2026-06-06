@@ -1,8 +1,14 @@
 """Configuración del negocio - Editar aquí para personalizar."""
 import os
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # En Lambda no hay python-dotenv
 
-load_dotenv()
+# --- Runtime ---
+IS_LAMBDA = bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+DYNAMODB_TABLE = os.getenv("DYNAMODB_TABLE", "chatbot-agendamiento")
 
 # --- Tokens ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
