@@ -75,16 +75,12 @@ def mock_whatsapp_send():
 
 
 @pytest.fixture
-def mock_telegram_startup():
+def mock_telegram_startup(temp_db_path):
     """Mock del startup de Telegram para evitar setup externo."""
     import server as server_module
-    original = server_module.startup
-    async def fake_startup():
-        import database as db_module
-        db_module.init_db()
-    server_module.startup = fake_startup
+    import database as db_module
+    db_module.init_db()
     yield
-    server_module.startup = original
 
 
 @pytest.fixture
