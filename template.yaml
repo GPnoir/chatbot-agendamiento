@@ -105,6 +105,22 @@ Resources:
             Path: /telegram/webhook
             Method: post
 
+  # ── Reminder Lambda ────────────────────────────────────────────────
+  ReminderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: chatbot-reminder
+      Handler: reminder_handler.handler
+      CodeUri: .
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ChatbotTable
+      Events:
+        HourlyCheck:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 hour)
+
   # ── Warm-up (evitar cold starts) ─────────────────────────────────
   WarmUpRule:
     Type: AWS::Events::Rule

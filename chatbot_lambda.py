@@ -19,6 +19,7 @@ CANCEL_CONFIRM = "CANCEL_CONFIRM"
 MODIFY_SELECT = "MODIFY_SELECT"
 MODIFY_DATE = "MODIFY_DATE"
 MODIFY_TIME = "MODIFY_TIME"
+CONFIRM_ATTENDANCE = "CONFIRM_ATTENDANCE"
 
 
 def _get_session(user_id: str) -> dict:
@@ -46,6 +47,13 @@ def handle_message(canal: str, canal_user_id: str, text: str) -> str:
         _save_session(canal_user_id, session)
         return MENSAJES["bienvenida"].format(**NEGOCIO)
 
+    # Comandos admin (solo profesional)
+    from config import ADMIN_USER_ID
+    if canal_user_id == ADMIN_USER_ID and text.startswith("/"):
+        resp = _handle_admin_command(text)
+        if resp:
+            return resp
+
     if state == IDLE:
         resp = _handle_idle(session, canal, canal_user_id, text)
     elif state == BOOKING_SERVICE:
@@ -70,6 +78,8 @@ def handle_message(canal: str, canal_user_id: str, text: str) -> str:
         resp = _handle_modify_date(session, text)
     elif state == MODIFY_TIME:
         resp = _handle_modify_time(session, text)
+    elif state == CONFIRM_ATTENDANCE:
+        resp = _handle_confirm_attendance(session, canal, canal_user_id, text)
     else:
         session = {"state": IDLE, "data": {}}
         resp = MENSAJES["bienvenida"].format(**NEGOCIO)
@@ -217,6 +227,13 @@ def _handle_booking_name(session, canal, canal_user_id, text):
 def _handle_booking_confirm(session, canal, canal_user_id, text):
     if text.lower() in ("si", "sí", "s", "1"):
         cliente = db.get_or_create_cliente(canal, canal_user_id, session["data"]["nombre_cliente"])
+        # Verificar límite de citas
+        from config import MAX_CITAS_POR_CLIENTE
+        citas_activas = db.get_citas_cliente(cliente["id"])
+        if len(citas_activas) >= MAX_CITAS_POR_CLIENTE:
+            session["state"] = IDLE
+            session["data"] = {}
+            return f"⚠️ Ya tienes {len(citas_activas)} citas agendadas (máximo {MAX_CITAS_POR_CLIENTE}). Cancela una existente para agendar otra."
         serv = session["data"]["servicio"]
         prof = session["data"]["profesional"]
         fecha = session["data"]["fecha"]
@@ -314,3 +331,65 @@ def _handle_modify_time(session, text):
     session["state"] = IDLE
     session["data"] = {}
     return f"✅ Cita modificada a {fecha.strftime('%d/%m/%Y')} a las {hora}.\n\nEscribe *menu* para volver."
+
+
+def _handle_confirm_attendance(session, canal, canal_user_id, text):
+    """Maneja respuesta a recordatorio de asistencia."""
+    cita = session["data"].get("cita_pendiente")
+    if text.lower() in ("si", "sí", "s", "1"):
+        session["state"] = IDLE
+        session["data"] = {}
+        return "✅ ¡Perfecto! Te esperamos. Recuerda llegar 5 minutos antes."
+    elif text.lower() in ("no", "n", "2"):
+        if cita:
+            db.cancelar_cita(cita["PK"], cita["SK"])
+        session["state"] = IDLE
+        session["data"] = {}
+        return "❌ Cita cancelada. Escribe *menu* si deseas reagendar."
+    return "Responde *si* para confirmar o *no* para cancelar."
+
+
+def _handle_admin_command(text: str) -> str | None:
+    """Comandos del profesional: /bloquear, /desbloquear, /agenda."""
+    parts = text.split()
+    cmd = parts[0].lower()
+
+    if cmd == "/bloquear" and len(parts) >= 2:
+        # /bloquear 2026-06-15 o /bloquear 2026-06-15 10:00
+        fecha = parts[1]
+        if len(parts) >= 3:
+            db.bloquear_hora(1, fecha, parts[2])
+            return f"🔒 Bloqueada hora {parts[2]} del {fecha}"
+        db.bloquear_fecha(1, fecha)
+        return f"🔒 Día {fecha} bloqueado completamente"
+
+    elif cmd == "/desbloquear" and len(parts) >= 2:
+        db.desbloquear_fecha(1, parts[1])
+        return f"🔓 Día {parts[1]} desbloqueado"
+
+    elif cmd == "/agenda":
+        from datetime import date
+        hoy = date.today().isoformat()
+        citas = []
+        table = db.get_table()
+        resp = table.scan(
+            FilterExpression="begins_with(PK, :p) AND fecha = :f AND estado = :e",
+            ExpressionAttributeValues={":p": "APPOINTMENT#", ":f": hoy, ":e": "confirmada"},
+        )
+        citas = sorted(resp["Items"], key=lambda x: x["hora"])
+        if not citas:
+            return f"📋 Sin citas para hoy ({hoy})"
+        lines = [f"📋 Agenda de hoy ({hoy}):\n"]
+        for c in citas:
+            lines.append(f"  {c['hora']} - {c.get('servicio_nombre', '?')}")
+        return "\n".join(lines)
+
+    elif cmd == "/ayuda":
+        return (
+            "🔧 Comandos admin:\n"
+            "/bloquear 2026-06-15 → bloquea día completo\n"
+            "/bloquear 2026-06-15 10:00 → bloquea hora\n"
+            "/desbloquear 2026-06-15 → desbloquea día\n"
+            "/agenda → citas de hoy"
+        )
+    return None

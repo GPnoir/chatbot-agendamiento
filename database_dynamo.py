@@ -97,9 +97,16 @@ def get_or_create_cliente(canal: str, canal_user_id: str, nombre: str = None) ->
 
 
 def get_horas_disponibles(profesional_id: int, fecha: date, servicio_duracion: int) -> list[str]:
-    """Retorna horas disponibles para un profesional en una fecha, validando solapamiento."""
+    """Retorna horas disponibles para un profesional en una fecha, validando solapamiento y bloqueos."""
     table = get_table()
     dia_semana = fecha.weekday()
+    fecha_str = fecha.isoformat()
+
+    # Verificar bloqueos
+    bloqueos = get_bloqueos(profesional_id, fecha_str)
+    if bloqueos["dia_completo"]:
+        return []
+
     # Obtener horario
     resp = table.get_item(Key={"PK": f"SCHEDULE#{profesional_id}", "SK": f"DAY#{dia_semana}"})
     if "Item" not in resp:
@@ -107,13 +114,11 @@ def get_horas_disponibles(profesional_id: int, fecha: date, servicio_duracion: i
     horario = resp["Item"]
 
     # Obtener citas existentes ese día (con duración)
-    fecha_str = fecha.isoformat()
     citas_resp = table.query(
         IndexName="GSI1",
         KeyConditionExpression=Key("GSI1PK").eq(f"APPT#PROF#{profesional_id}") & Key("GSI1SK").begins_with(f"DATE#{fecha_str}"),
         FilterExpression=Attr("estado").eq("confirmada"),
     )
-    # Construir bloques ocupados (inicio, fin) en minutos desde 00:00
     bloques_ocupados = []
     for item in citas_resp["Items"]:
         h, m = map(int, item["hora"].split(":"))
@@ -121,25 +126,27 @@ def get_horas_disponibles(profesional_id: int, fecha: date, servicio_duracion: i
         dur = int(item.get("servicio_duracion", 60))
         bloques_ocupados.append((inicio_min, inicio_min + dur))
 
+    horas_bloqueadas = set(bloqueos["horas"])
+
     # Generar slots y verificar solapamiento
     inicio = datetime.strptime(horario["hora_inicio"], "%H:%M")
     fin = datetime.strptime(horario["hora_fin"], "%H:%M")
-    slot_dur = timedelta(minutes=servicio_duracion)
     disponibles = []
     current = inicio
-    while current + slot_dur <= fin:
+    while current + timedelta(minutes=servicio_duracion) <= fin:
         hora_str = current.strftime("%H:%M")
-        h, m = current.hour, current.minute
-        slot_inicio = h * 60 + m
+        if hora_str in horas_bloqueadas:
+            current += timedelta(minutes=30)
+            continue
+        slot_inicio = current.hour * 60 + current.minute
         slot_fin = slot_inicio + servicio_duracion
-        # Verificar que no se solape con ninguna cita existente
         solapa = any(
             slot_inicio < ocu_fin and slot_fin > ocu_inicio
             for ocu_inicio, ocu_fin in bloques_ocupados
         )
         if not solapa:
             disponibles.append(hora_str)
-        current += timedelta(minutes=30)  # Slots cada 30 min
+        current += timedelta(minutes=30)
     return disponibles
 
 
@@ -216,3 +223,53 @@ def modificar_cita(cita_pk: str, cita_sk: str, nueva_fecha: str, nueva_hora: str
     cancelar_cita(cita_pk, cita_sk)
     # Crear nueva
     crear_cita(cita["cliente_id"], cita["servicio_id"], cita["profesional_id"], nueva_fecha, nueva_hora)
+
+
+def bloquear_fecha(profesional_id: int, fecha: str, motivo: str = ""):
+    """Bloquea un día completo para un profesional."""
+    table = get_table()
+    table.put_item(Item={
+        "PK": f"BLOCK#{profesional_id}",
+        "SK": f"DATE#{fecha}",
+        "profesional_id": profesional_id,
+        "fecha": fecha,
+        "motivo": motivo,
+    })
+
+
+def bloquear_hora(profesional_id: int, fecha: str, hora: str):
+    """Bloquea una hora específica."""
+    table = get_table()
+    table.put_item(Item={
+        "PK": f"BLOCK#{profesional_id}",
+        "SK": f"DATE#{fecha}#{hora}",
+        "profesional_id": profesional_id,
+        "fecha": fecha,
+        "hora": hora,
+    })
+
+
+def get_bloqueos(profesional_id: int, fecha: str) -> dict:
+    """Retorna bloqueos para un profesional en una fecha. {'dia_completo': bool, 'horas': [...]}"""
+    table = get_table()
+    resp = table.query(
+        KeyConditionExpression=Key("PK").eq(f"BLOCK#{profesional_id}") & Key("SK").begins_with(f"DATE#{fecha}"),
+    )
+    result = {"dia_completo": False, "horas": []}
+    for item in resp["Items"]:
+        if "hora" in item:
+            result["horas"].append(item["hora"])
+        else:
+            result["dia_completo"] = True
+    return result
+
+
+def desbloquear_fecha(profesional_id: int, fecha: str):
+    """Elimina bloqueos de un día."""
+    table = get_table()
+    resp = table.query(
+        KeyConditionExpression=Key("PK").eq(f"BLOCK#{profesional_id}") & Key("SK").begins_with(f"DATE#{fecha}"),
+    )
+    with table.batch_writer() as batch:
+        for item in resp["Items"]:
+            batch.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
