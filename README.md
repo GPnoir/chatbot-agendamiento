@@ -54,7 +54,7 @@ chatbot-agendamiento/
 ## 🚀 Instalación
 
 ```bash
-git clone https://github.com/tu-usuario/chatbot-agendamiento.git
+git clone https://github.com/GPnoir/chatbot-agendamiento.git
 cd chatbot-agendamiento
 python3 -m venv venv
 source venv/bin/activate
