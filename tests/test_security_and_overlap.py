@@ -16,6 +16,153 @@ from config import MENSAJES
 from tests.conftest import TEST_USER
 
 # ---------------------------------------------------------------------------
+# DynamoDB-backed rate limiter tests (issue #23)
+# ---------------------------------------------------------------------------
+
+try:
+    from moto import mock_aws
+    _MOTO_AVAILABLE = True
+except ImportError:
+    _MOTO_AVAILABLE = False
+
+pytestmark_dynamo = pytest.mark.skipif(
+    not _MOTO_AVAILABLE, reason="moto not installed"
+)
+
+
+@pytest.fixture()
+def dynamo_rate_limit_table(monkeypatch):
+    """Provision a moto-backed DynamoDB table and wire env + module cache.
+
+    Strategy: create the moto table, then inject it directly into
+    ``database_dynamo._table`` so that ``get_table()`` returns the moto-backed
+    Table without caring about env var ordering or TABLE_NAME being evaluated
+    at import time.  The singleton is reset both before (so moto creates it)
+    and after (so later tests are not poisoned).
+    """
+    if not _MOTO_AVAILABLE:
+        pytest.skip("moto not installed")
+
+    import boto3
+    import database_dynamo
+
+    monkeypatch.setenv("RATE_LIMITER_BACKEND", "dynamo")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_SECURITY_TOKEN", "testing")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "testing")
+
+    with mock_aws():
+        # Create the table matching template.yaml schema (PK/SK, TTL on ttl)
+        dynamo = boto3.resource("dynamodb", region_name="us-east-1")
+        table = dynamo.create_table(
+            TableName="chatbot-agendamiento-test",
+            BillingMode="PAY_PER_REQUEST",
+            AttributeDefinitions=[
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
+            ],
+            KeySchema=[
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
+            ],
+        )
+        table.wait_until_exists()
+
+        # Inject the moto-backed Table directly into the singleton cache.
+        # This bypasses TABLE_NAME (set at import time) and ensures get_table()
+        # returns the moto table for the duration of the test.
+        original_table = database_dynamo._table
+        database_dynamo._table = table
+        try:
+            yield table
+        finally:
+            # Restore so subsequent tests start clean
+            database_dynamo._table = original_table
+
+
+@pytestmark_dynamo
+class TestDynamoRateLimiter:
+    """DynamoDB fixed-window backend tests."""
+
+    def test_under_limit_allowed(self, dynamo_rate_limit_table):
+        """Calls below the limit must not be rate-limited."""
+        for i in range(19):
+            assert not rate_limiter.is_rate_limited("dynamo_user_under"), \
+                f"Call {i + 1} should be allowed"
+
+    def test_over_limit_blocked(self, dynamo_rate_limit_table):
+        """The 21st call within the same window must be rate-limited."""
+        user = "dynamo_user_over"
+        # Exhaust the limit (20 calls)
+        for _ in range(20):
+            rate_limiter.is_rate_limited(user)
+        # 21st must be blocked
+        assert rate_limiter.is_rate_limited(user)
+
+    def test_independent_users_are_independent(self, dynamo_rate_limit_table):
+        """Hitting the limit for user A must not affect user B."""
+        for _ in range(20):
+            rate_limiter.is_rate_limited("dynamo_user_a_indep")
+        assert rate_limiter.is_rate_limited("dynamo_user_a_indep")
+        assert not rate_limiter.is_rate_limited("dynamo_user_b_indep")
+
+    def test_window_rollover_unblocks_user(self, dynamo_rate_limit_table):
+        """When the fixed window rolls over, a previously blocked user is unblocked."""
+        user = "dynamo_user_rollover"
+        from config import RATE_LIMIT_WINDOW_SECONDS
+
+        # Move time to start of a fresh window
+        base_time = 1_000_000.0
+        with patch("time.time", return_value=base_time):
+            for _ in range(20):
+                rate_limiter.is_rate_limited(user)
+            assert rate_limiter.is_rate_limited(user)
+
+        # Advance past the window boundary
+        next_window_time = base_time + RATE_LIMIT_WINDOW_SECONDS + 1
+        with patch("time.time", return_value=next_window_time):
+            assert not rate_limiter.is_rate_limited(user)
+
+    def test_ttl_attribute_present_and_future(self, dynamo_rate_limit_table):
+        """Rate-limit items must have a ttl attribute set in the future."""
+        import boto3
+        user = "dynamo_user_ttl"
+        now = time.time()
+        rate_limiter.is_rate_limited(user)
+
+        # Scan the table for the rate limit item
+        table = dynamo_rate_limit_table
+        resp = table.scan(
+            FilterExpression="begins_with(PK, :pk)",
+            ExpressionAttributeValues={":pk": "RATELIMIT#"},
+        )
+        items = [i for i in resp["Items"] if i["PK"] == f"RATELIMIT#{user}"]
+        assert items, "Rate limit item must exist in DynamoDB"
+        assert "ttl" in items[0], "ttl attribute must be present"
+        assert int(items[0]["ttl"]) > now, "ttl must be in the future"
+
+    def test_dynamo_exception_fails_open(self, dynamo_rate_limit_table):
+        """If DynamoDB raises, is_rate_limited must return False (fail-open)."""
+        import database_dynamo
+        mock_table = MagicMock()
+        mock_table.update_item.side_effect = Exception("DynamoDB unavailable")
+        with patch.object(database_dynamo, "get_table", return_value=mock_table):
+            result = rate_limiter.is_rate_limited("dynamo_user_fail_open")
+        assert result is False, "Must fail open — infra outage must not block users"
+
+    def test_memory_backend_still_works(self):
+        """Memory backend (default) must behave as before, unaffected by this feature."""
+        with patch.dict("os.environ", {"RATE_LIMITER_BACKEND": "memory"}, clear=False):
+            # Ensure the in-memory state is clean
+            rate_limiter.reset()
+            user = "mem_backend_user"
+            for _ in range(20):
+                rate_limiter.is_rate_limited(user)
+            assert rate_limiter.is_rate_limited(user)
+
+# ---------------------------------------------------------------------------
 # Admin endpoint auth tests
 # ---------------------------------------------------------------------------
 
