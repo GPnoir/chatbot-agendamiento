@@ -56,7 +56,8 @@ async def verify_webhook(request: Request):
     mode = params.get("hub.mode")
     token = params.get("hub.verify_token")
     challenge = params.get("hub.challenge")
-    if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
+    # Empty verify token fails closed: never match an unconfigured deployment
+    if WHATSAPP_VERIFY_TOKEN and mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
         return Response(content=challenge, media_type="text/plain")
     return Response(status_code=403)
 

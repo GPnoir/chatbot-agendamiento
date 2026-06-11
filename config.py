@@ -19,11 +19,11 @@ MAX_CITAS_POR_CLIENTE = int(os.getenv("MAX_CITAS_POR_CLIENTE", "3"))
 
 # --- Tokens ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "telegram_secret_change_me")
+TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
-WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "mi_token_secreto")
+WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
 WHATSAPP_APP_SECRET = os.getenv("WHATSAPP_APP_SECRET", "")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://localhost:8000")
 HOST = os.getenv("HOST", "0.0.0.0")

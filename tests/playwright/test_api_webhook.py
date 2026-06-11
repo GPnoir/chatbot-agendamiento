@@ -5,8 +5,7 @@ con los parámetros hub.mode, hub.verify_token y hub.challenge.
 """
 from playwright.sync_api import APIRequestContext
 
-
-VERIFY_TOKEN = "mi_token_secreto"
+from config import WHATSAPP_VERIFY_TOKEN as VERIFY_TOKEN
 
 
 def test_verificacion_exitosa(api_context: APIRequestContext):

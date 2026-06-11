@@ -5,6 +5,14 @@ from pathlib import Path
 from typing import Generator
 from unittest.mock import AsyncMock
 
+# Test env vars must be set BEFORE the first `config` import below:
+# config.py reads the environment at import time, so a fixture is too late.
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "")
+os.environ.setdefault("WHATSAPP_TOKEN", "")
+os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "0")
+os.environ.setdefault("WHATSAPP_VERIFY_TOKEN", "test_verify_token")
+os.environ.setdefault("TELEGRAM_WEBHOOK_SECRET", "test_telegram_secret")
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -12,15 +20,6 @@ from config import NEGOCIO, MENSAJES
 
 TEST_USER = "pytest_test_user_001"
 TEST_USER2 = "pytest_test_user_002"
-
-
-@pytest.fixture(autouse=True)
-def env_setup():
-    """Override env vars para evitar dependencias externas."""
-    os.environ.setdefault("TELEGRAM_BOT_TOKEN", "")
-    os.environ.setdefault("WHATSAPP_TOKEN", "")
-    os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "0")
-    os.environ.setdefault("WHATSAPP_VERIFY_TOKEN", "mi_token_secreto")
 
 
 @pytest.fixture

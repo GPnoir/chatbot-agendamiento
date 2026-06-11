@@ -1180,3 +1180,61 @@ class TestProductionAppCORSPreflight:
                 },
             )
         assert "access-control-allow-origin" not in resp.headers
+
+
+# ---------------------------------------------------------------------------
+# Empty secrets must fail closed (no hardcoded defaults)
+# ---------------------------------------------------------------------------
+
+class TestEmptySecretFailClosed:
+    """An empty webhook secret/token must reject every request, never fail open."""
+
+    def test_lambda_telegram_rejects_when_secret_empty(self):
+        """lambda_handler Telegram webhook must 403 when TELEGRAM_WEBHOOK_SECRET is empty."""
+        import lambda_handler
+        with patch("lambda_handler.TELEGRAM_WEBHOOK_SECRET", ""):
+            with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+                resp = c.post("/telegram/webhook", json={})
+        assert resp.status_code == 403
+
+    def test_server_telegram_rejects_when_secret_empty(self):
+        """server Telegram webhook must 403 when TELEGRAM_WEBHOOK_SECRET is empty."""
+        import server as server_module
+        server_module.app.router.on_startup.clear()
+        server_module.app.router.on_shutdown.clear()
+        with patch("server.TELEGRAM_WEBHOOK_SECRET", ""):
+            with TestClient(server_module.app, raise_server_exceptions=True) as c:
+                resp = c.post("/telegram/webhook", json={})
+        assert resp.status_code == 403
+
+    def test_lambda_whatsapp_verify_rejects_when_token_empty(self):
+        """lambda_handler WhatsApp verify must 403 when WHATSAPP_VERIFY_TOKEN is empty."""
+        import lambda_handler
+        with patch("lambda_handler.WHATSAPP_VERIFY_TOKEN", ""):
+            with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+                resp = c.get(
+                    "/whatsapp/webhook",
+                    params={
+                        "hub.mode": "subscribe",
+                        "hub.verify_token": "",
+                        "hub.challenge": "challenge_123",
+                    },
+                )
+        assert resp.status_code == 403
+
+    def test_channel_whatsapp_verify_rejects_when_token_empty(self):
+        """channels/whatsapp_bot verify must 403 when WHATSAPP_VERIFY_TOKEN is empty."""
+        import server as server_module
+        server_module.app.router.on_startup.clear()
+        server_module.app.router.on_shutdown.clear()
+        with patch("channels.whatsapp_bot.WHATSAPP_VERIFY_TOKEN", ""):
+            with TestClient(server_module.app, raise_server_exceptions=True) as c:
+                resp = c.get(
+                    "/whatsapp/webhook",
+                    params={
+                        "hub.mode": "subscribe",
+                        "hub.verify_token": "",
+                        "hub.challenge": "challenge_123",
+                    },
+                )
+        assert resp.status_code == 403

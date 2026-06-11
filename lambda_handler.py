@@ -307,7 +307,8 @@ async def _send_telegram(chat_id: int, text: str):
 @app.get("/whatsapp/webhook")
 async def whatsapp_verify(request: Request):
     params = request.query_params
-    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == WHATSAPP_VERIFY_TOKEN:
+    # Empty verify token fails closed: never match an unconfigured deployment
+    if WHATSAPP_VERIFY_TOKEN and params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == WHATSAPP_VERIFY_TOKEN:
         return Response(content=params.get("hub.challenge", ""), media_type="text/plain")
     return Response(status_code=403)
 
@@ -348,7 +349,8 @@ async def telegram_webhook(request: Request):
     import logging
     logger = logging.getLogger()
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    if secret != TELEGRAM_WEBHOOK_SECRET:
+    # Empty configured secret fails closed: reject everything
+    if not TELEGRAM_WEBHOOK_SECRET or secret != TELEGRAM_WEBHOOK_SECRET:
         logger.info(f"Telegram: secret mismatch, got='{secret[:10]}...'")
         return JSONResponse(status_code=403, content={"error": "forbidden"})
     data = await request.json()
