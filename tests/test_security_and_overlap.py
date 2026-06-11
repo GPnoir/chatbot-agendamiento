@@ -146,11 +146,24 @@ class TestDynamoRateLimiter:
     def test_dynamo_exception_fails_open(self, dynamo_rate_limit_table):
         """If DynamoDB raises, is_rate_limited must return False (fail-open)."""
         import database_dynamo
+        from botocore.exceptions import ClientError
         mock_table = MagicMock()
-        mock_table.update_item.side_effect = Exception("DynamoDB unavailable")
+        mock_table.update_item.side_effect = ClientError(
+            {"Error": {"Code": "ProvisionedThroughputExceededException", "Message": "throttled"}},
+            "UpdateItem",
+        )
         with patch.object(database_dynamo, "get_table", return_value=mock_table):
             result = rate_limiter.is_rate_limited("dynamo_user_fail_open")
         assert result is False, "Must fail open — infra outage must not block users"
+
+    def test_dynamo_unexpected_exception_fails_open(self, dynamo_rate_limit_table):
+        """Non-ClientError bugs must also fail open, never crash message handling."""
+        import database_dynamo
+        mock_table = MagicMock()
+        mock_table.update_item.side_effect = KeyError("Attributes")
+        with patch.object(database_dynamo, "get_table", return_value=mock_table):
+            result = rate_limiter.is_rate_limited("dynamo_user_unexpected")
+        assert result is False, "Must fail open on unexpected errors"
 
     def test_memory_backend_still_works(self):
         """Memory backend (default) must behave as before, unaffected by this feature."""

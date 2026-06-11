@@ -25,6 +25,7 @@ temporarily ineffective during such an outage.
 Clears the in-memory state only.  It is a test helper and has no effect on
 the DynamoDB backend; DynamoDB items expire via TTL.
 """
+import hashlib
 import logging
 import os
 import time
@@ -33,6 +34,11 @@ from collections import defaultdict
 from config import RATE_LIMIT_MAX_MESSAGES, RATE_LIMIT_WINDOW_SECONDS
 
 logger = logging.getLogger(__name__)
+
+
+def _hash_user_id(user_id: str) -> str:
+    """Short non-reversible identifier for logs; raw user ids are PII."""
+    return hashlib.sha256(user_id.encode()).hexdigest()[:8]
 
 # Module-level aliases kept for backward compatibility with tests that
 # reference ``rate_limiter.MAX_MESSAGES`` or ``rate_limiter.WINDOW_SECONDS``.
@@ -96,7 +102,12 @@ def _is_rate_limited_dynamo(user_id: str) -> bool:
     """
     try:
         import database_dynamo
+        from botocore.exceptions import ClientError
+    except ImportError:
+        logger.error("DynamoDB rate limiter backend unavailable — failing open")
+        return False
 
+    try:
         now = time.time()
         window = int(now) // WINDOW_SECONDS
         window_end = (window + 1) * WINDOW_SECONDS
@@ -108,7 +119,7 @@ def _is_rate_limited_dynamo(user_id: str) -> bool:
                 "PK": f"RATELIMIT#{user_id}",
                 "SK": f"WINDOW#{window}",
             },
-            UpdateExpression="ADD #count :one SET #ttl = :ttl",
+            UpdateExpression="ADD #count :one SET #ttl = if_not_exists(#ttl, :ttl)",
             ExpressionAttributeNames={
                 "#count": "count",
                 "#ttl": "ttl",
@@ -121,9 +132,16 @@ def _is_rate_limited_dynamo(user_id: str) -> bool:
         )
         count = int(resp["Attributes"]["count"])
         return count > MAX_MESSAGES
+    except ClientError:
+        logger.error(
+            "DynamoDB rate limiter ClientError for user=%s — failing open",
+            _hash_user_id(user_id),
+        )
+        return False
     except Exception:
         logger.error(
-            "DynamoDB rate limiter error for user_id=%s — failing open",
-            user_id,
+            "Unexpected rate limiter error for user=%s — failing open",
+            _hash_user_id(user_id),
+            exc_info=True,
         )
         return False
