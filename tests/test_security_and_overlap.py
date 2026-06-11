@@ -1,14 +1,161 @@
 """Tests para rate limiter, input sanitization y solapamiento de horarios."""
 import time
 from datetime import date, timedelta
+from unittest.mock import patch, MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
 import chatbot
 import database as db_module
 import rate_limiter
 from config import MENSAJES
 from tests.conftest import TEST_USER
+
+# ---------------------------------------------------------------------------
+# Admin endpoint auth tests
+# ---------------------------------------------------------------------------
+
+VALID_KEY = "test-admin-key-secure-12345"
+
+
+def _make_admin_client(admin_api_key: str = VALID_KEY):
+    """Return a TestClient for lambda_handler.app with ADMIN_API_KEY patched."""
+    import config
+    import lambda_handler
+
+    # Re-import to pick up patched config
+    with patch.object(config, "ADMIN_API_KEY", admin_api_key):
+        # lambda_handler imports ADMIN_API_KEY at module level via config, so
+        # we patch it in lambda_handler's namespace directly too.
+        with patch("lambda_handler.ADMIN_API_KEY", admin_api_key):
+            client = TestClient(lambda_handler.app, raise_server_exceptions=True)
+            yield client
+
+
+@pytest.fixture()
+def lambda_client():
+    """TestClient wired to lambda_handler.app with a known ADMIN_API_KEY."""
+    import config
+    import lambda_handler
+
+    with patch.object(config, "ADMIN_API_KEY", VALID_KEY):
+        with patch("lambda_handler.ADMIN_API_KEY", VALID_KEY):
+            with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+                yield c
+
+
+@pytest.fixture()
+def lambda_client_empty_key():
+    """TestClient wired to lambda_handler.app with an empty ADMIN_API_KEY."""
+    import config
+    import lambda_handler
+
+    with patch.object(config, "ADMIN_API_KEY", ""):
+        with patch("lambda_handler.ADMIN_API_KEY", ""):
+            with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+                yield c
+
+
+def _mock_db_scan():
+    """Return a mock that simulates an empty DynamoDB scan result."""
+    mock_table = MagicMock()
+    mock_table.scan.return_value = {"Items": []}
+    return mock_table
+
+
+class TestAdminAgendaAuth:
+    """Authentication tests for /admin/agenda."""
+
+    def test_no_auth_header_rejected(self, lambda_client):
+        """Request with no Authorization header must be rejected."""
+        resp = lambda_client.get("/admin/agenda")
+        assert resp.status_code in (401, 403)
+
+    def test_wrong_key_rejected(self, lambda_client):
+        """Request with wrong Bearer token must be rejected."""
+        resp = lambda_client.get(
+            "/admin/agenda", headers={"Authorization": "Bearer wrong-key"}
+        )
+        assert resp.status_code in (401, 403)
+
+    def test_correct_key_accepted(self, lambda_client):
+        """Request with correct Bearer token and mocked DB must return 200."""
+        with patch("lambda_handler.db.get_table", return_value=_mock_db_scan()):
+            resp = lambda_client.get(
+                "/admin/agenda",
+                headers={"Authorization": f"Bearer {VALID_KEY}"},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "citas" in body
+
+    def test_empty_api_key_config_rejects_all(self, lambda_client_empty_key):
+        """When ADMIN_API_KEY is empty, even a matching empty Bearer must be rejected."""
+        resp = lambda_client_empty_key.get(
+            "/admin/agenda", headers={"Authorization": "Bearer "}
+        )
+        assert resp.status_code in (401, 403)
+
+    def test_empty_api_key_config_rejects_any_key(self, lambda_client_empty_key):
+        """When ADMIN_API_KEY is empty, any non-empty Bearer must also be rejected."""
+        resp = lambda_client_empty_key.get(
+            "/admin/agenda", headers={"Authorization": f"Bearer {VALID_KEY}"}
+        )
+        assert resp.status_code in (401, 403)
+
+    def test_query_param_token_no_longer_works(self, lambda_client):
+        """Legacy ?token=... query parameter must NOT grant access."""
+        resp = lambda_client.get(f"/admin/agenda?token={VALID_KEY}")
+        assert resp.status_code in (401, 403)
+
+    def test_malformed_authorization_rejected(self, lambda_client):
+        """Authorization header without 'Bearer' scheme must be rejected."""
+        resp = lambda_client.get(
+            "/admin/agenda", headers={"Authorization": VALID_KEY}
+        )
+        assert resp.status_code in (401, 403)
+
+
+class TestAdminPanelAuth:
+    """Tests for /admin/panel — must serve login shell, never appointment data."""
+
+    def test_panel_returns_200_no_auth_required(self, lambda_client):
+        """The panel HTML page itself must be publicly reachable (login shell)."""
+        resp = lambda_client.get("/admin/panel")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+
+    def test_panel_contains_no_appointment_data(self, lambda_client):
+        """Panel HTML must not contain server-rendered appointment records.
+
+        The panel is a login shell: it shows a login overlay and hides the
+        calendar grid until the JS authenticates client-side. No appointment
+        records should be pre-rendered by the server.
+        """
+        resp = lambda_client.get("/admin/panel")
+        html = resp.text
+        # Login overlay must be present and calendar hidden on load
+        assert "login-overlay" in html
+        assert "sessionStorage" in html
+        # Calendar grid starts hidden — no pre-rendered appointment divs
+        assert 'style="--days:7;display:none"' in html or "display:none" in html
+
+    def test_panel_contains_no_secret_in_html(self, lambda_client):
+        """Panel HTML must not embed ADMIN_API_KEY or any secret value."""
+        resp = lambda_client.get("/admin/panel")
+        html = resp.text
+        assert VALID_KEY not in html
+
+    def test_panel_uses_authorization_header_not_query_param(self, lambda_client):
+        """Panel JS must use Authorization header, not ?token= query param."""
+        resp = lambda_client.get("/admin/panel")
+        html = resp.text
+        # Old pattern that leaked token into URL must be gone
+        assert "location.search" not in html
+        assert "?token=" not in html
+        # New pattern: Authorization header in fetch
+        assert "Authorization" in html
 
 
 class TestRateLimiter:

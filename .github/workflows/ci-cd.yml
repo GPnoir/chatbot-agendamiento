@@ -77,7 +77,8 @@ jobs:
               "WhatsAppToken=${{ secrets.WHATSAPP_TOKEN }}" \
               "WhatsAppPhoneNumberId=${{ secrets.WHATSAPP_PHONE_NUMBER_ID }}" \
               "WhatsAppVerifyToken=${{ secrets.WHATSAPP_VERIFY_TOKEN }}" \
-              "WhatsAppAppSecret=${{ secrets.WHATSAPP_APP_SECRET }}"
+              "WhatsAppAppSecret=${{ secrets.WHATSAPP_APP_SECRET }}" \
+              "AdminApiKey=${{ secrets.ADMIN_API_KEY }}"
 
       - name: Configure Telegram Webhook
         env:

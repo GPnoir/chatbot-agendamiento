@@ -13,7 +13,7 @@ import chatbot_lambda as chatbot
 import database_dynamo as db
 from config import (
     WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN,
-    WHATSAPP_APP_SECRET, TELEGRAM_WEBHOOK_SECRET,
+    WHATSAPP_APP_SECRET, TELEGRAM_WEBHOOK_SECRET, ADMIN_API_KEY,
 )
 
 app = FastAPI(title="Chatbot Agendamiento Lambda")
@@ -31,11 +31,31 @@ async def health():
     return {"status": "ok", "service": "chatbot-agendamiento", "runtime": "lambda"}
 
 
+def _check_admin_auth(request: Request) -> bool:
+    """Verify the Authorization: Bearer <key> header for admin endpoints.
+
+    Returns True when the key is valid. Fails closed: if ADMIN_API_KEY is
+    empty or unset, always returns False regardless of the presented token.
+    """
+    if not ADMIN_API_KEY:
+        return False
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return False
+    presented = auth_header[len("Bearer "):]
+    return hmac.compare_digest(presented, ADMIN_API_KEY)
+
+
 @app.get("/admin/agenda")
-async def admin_agenda(fecha: str = None, desde: str = None, hasta: str = None, token: str = None):
-    """API JSON de la agenda. Soporta fecha única o rango (desde/hasta). Incluye datos del cliente."""
-    if token != TELEGRAM_WEBHOOK_SECRET:
-        return JSONResponse(status_code=403, content={"error": "forbidden"})
+async def admin_agenda(
+    request: Request,
+    fecha: str = None,
+    desde: str = None,
+    hasta: str = None,
+):
+    """Admin JSON agenda API. Requires Authorization: Bearer <ADMIN_API_KEY> header."""
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
     from datetime import date as d, timedelta
     from decimal import Decimal
 
@@ -79,7 +99,7 @@ async def admin_agenda(fecha: str = None, desde: str = None, hasta: str = None, 
 
 @app.get("/admin/panel")
 async def admin_panel():
-    """Panel HTML - vista calendario semanal con detalle por hora y datos de contacto."""
+    """Admin calendar panel — login shell only, no appointment data embedded."""
     html = """<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Agenda - Centro de Flores de Bach</title>
 <style>
@@ -103,20 +123,68 @@ h1{color:#2d5a27;font-size:1.4em}
 .hoy{background:#f1f8e9}
 .weekend{background:#fafafa}
 .cerrado{background:#f5f5f5;color:#bbb;display:flex;align-items:center;justify-content:center;font-size:.7em}
+#login-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:100}
+#login-box{background:#fff;border-radius:12px;padding:32px;min-width:320px;box-shadow:0 4px 24px rgba(0,0,0,.2)}
+#login-box h2{color:#2d5a27;margin-bottom:16px;font-size:1.2em}
+#login-box input{width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:1em;margin-bottom:12px}
+#login-box button{width:100%;padding:10px;background:#4caf50;color:#fff;border:none;border-radius:6px;font-size:1em;cursor:pointer}
+#login-box button:hover{background:#388e3c}
+#login-error{color:#c62828;font-size:.85em;margin-top:8px;display:none}
 @media(max-width:768px){.calendar{grid-template-columns:40px repeat(var(--days),1fr)}.cal-header,.cal-hour{font-size:.65em}.cita{font-size:.6em}}
 </style></head><body>
-<div class="header"><h1>🌸 Agenda</h1>
-<div class="nav"><button onclick="semana(-1)">◀ Anterior</button><span id="rango"></span><button onclick="semana(1)">Siguiente ▶</button></div></div>
-<div class="calendar" id="cal" style="--days:7"></div>
+<div id="login-overlay">
+  <div id="login-box">
+    <h2>Agenda — Acceso</h2>
+    <input type="password" id="api-key-input" placeholder="API key" autocomplete="current-password">
+    <button onclick="doLogin()">Ingresar</button>
+    <div id="login-error">Clave incorrecta. Intentá de nuevo.</div>
+  </div>
+</div>
+<div class="header" style="display:none" id="main-content">
+  <h1>🌸 Agenda</h1>
+  <div class="nav"><button onclick="semana(-1)">◀ Anterior</button><span id="rango"></span><button onclick="semana(1)">Siguiente ▶</button></div>
+</div>
+<div class="calendar" id="cal" style="--days:7;display:none"></div>
 <script>
-const T=new URLSearchParams(location.search).get("token")||"";
 const HORARIOS={0:{i:9,f:18},1:{i:9,f:18},2:{i:9,f:18},3:{i:9,f:18},4:{i:9,f:17},5:{i:9,f:13}};
 const DIAS=["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"];
 let offset=0;
+let apiKey="";
 
 function lunes(d){const r=new Date(d);const day=r.getDay();r.setDate(r.getDate()-((day+6)%7));return r}
 function fmt(d){return d.toISOString().slice(0,10)}
 function semana(dir){offset+=dir;render()}
+
+function doLogin(){
+  const k=document.getElementById("api-key-input").value.trim();
+  if(!k){return}
+  verifyKey(k);
+}
+document.getElementById("api-key-input").addEventListener("keydown",e=>{if(e.key==="Enter")doLogin()});
+
+async function verifyKey(k){
+  const today=new Date();
+  const r=await fetch(location.origin+"/Prod/admin/agenda?fecha="+fmt(today),{
+    headers:{"Authorization":"Bearer "+k}
+  });
+  if(r.ok){
+    apiKey=k;
+    sessionStorage.setItem("admin_api_key",k);
+    document.getElementById("login-overlay").style.display="none";
+    document.getElementById("main-content").style.display="flex";
+    document.getElementById("cal").style.display="grid";
+    render();
+  } else {
+    sessionStorage.removeItem("admin_api_key");
+    document.getElementById("login-error").style.display="block";
+  }
+}
+
+// Restore from session storage on page load
+(function(){
+  const stored=sessionStorage.getItem("admin_api_key");
+  if(stored){verifyKey(stored)}
+})();
 
 async function render(){
   const hoy=new Date();
@@ -127,12 +195,22 @@ async function render(){
   const desde=fmt(dias[0]),hasta=fmt(dias[6]);
   document.getElementById("rango").textContent=desde.slice(5)+" → "+hasta.slice(5);
 
-  const r=await fetch(location.origin+"/Prod/admin/agenda?desde="+desde+"&hasta="+hasta+"&token="+T);
+  const r=await fetch(location.origin+"/Prod/admin/agenda?desde="+desde+"&hasta="+hasta,{
+    headers:{"Authorization":"Bearer "+apiKey}
+  });
+  if(r.status===401||r.status===403){
+    sessionStorage.removeItem("admin_api_key");
+    apiKey="";
+    document.getElementById("login-overlay").style.display="flex";
+    document.getElementById("main-content").style.display="none";
+    document.getElementById("cal").style.display="none";
+    document.getElementById("login-error").style.display="block";
+    return;
+  }
   const data=await r.json();
   const citasMap={};
   (data.citas||[]).forEach(c=>{const k=c.fecha+"#"+c.hora;if(!citasMap[k])citasMap[k]=[];citasMap[k].push(c)});
 
-  // Determinar rango de horas (9-18 max)
   const minH=9,maxH=18;
   let html="<div class='cal-header'></div>";
   dias.forEach((d,i)=>{
@@ -166,7 +244,6 @@ async function render(){
   }
   document.getElementById("cal").innerHTML=html;
 }
-render();
 </script></body></html>"""
     return Response(content=html, media_type="text/html")
 
