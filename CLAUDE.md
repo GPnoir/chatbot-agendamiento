@@ -81,6 +81,29 @@ sam local invoke                          # Test Lambda locally
 5. Infra changes → update template.yaml + deploy.sh
 6. Ask before proceeding to next feature
 
+## Known Security Gaps (Priority)
+
+1. Rate limiter is IN-MEMORY — resets on every Lambda cold start (useless in production)
+2. Input sanitization is only text.strip() + null bytes — no length enforcement in handler
+3. No request body size limits on FastAPI endpoints
+4. No CORS configuration
+5. Admin endpoint uses TELEGRAM_WEBHOOK_SECRET as auth token (weak, shared secret)
+6. No structured logging — print/logger.info only
+7. No CloudWatch alarms or monitoring
+
+## Open Issues (GitHub)
+
+- #20 DynamoDB backup (DONE — PITR enabled in template.yaml)
+- #19 Structured logging
+- #17 Monitoring/alarms (CloudWatch)
+- #16 Lambda mock tests (moto)
+- #15 Metrics/reports
+- #14 Google Calendar export
+- #13 Payment integration
+- #12 Multi-professional support
+- #11 Smart rescheduling
+- #10 Interactive buttons (Telegram inline keyboard)
+
 ## Code Style
 
 - Python: type hints on all public functions
