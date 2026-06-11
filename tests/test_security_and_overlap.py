@@ -1,4 +1,7 @@
 """Tests para rate limiter, input sanitization y solapamiento de horarios."""
+import hashlib
+import hmac
+import json
 import time
 from datetime import date, timedelta
 from unittest.mock import patch, MagicMock
@@ -325,3 +328,113 @@ class TestSolapamientoHorarios:
         assert "10:00" in horas
         assert "10:30" in horas
         assert "11:30" in horas
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp signature verification tests (issue #22)
+# ---------------------------------------------------------------------------
+
+_WA_SECRET = "test-whatsapp-app-secret"
+_WA_BODY = b'{"object":"whatsapp_business_account","entry":[{"changes":[{"value":{"messages":[{"type":"text","from":"5491100000000","text":{"body":"hola"}}]}}]}]}'
+
+
+def _make_wa_signature(secret: str, body: bytes) -> str:
+    """Compute a valid X-Hub-Signature-256 for a given secret and body."""
+    digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
+
+@pytest.fixture()
+def wa_client_configured():
+    """TestClient wired to lambda_handler.app with WHATSAPP_APP_SECRET set."""
+    import lambda_handler
+
+    with patch("lambda_handler.WHATSAPP_APP_SECRET", _WA_SECRET):
+        # Prevent the handler from actually calling chatbot/send logic
+        with patch("lambda_handler.chatbot.handle_message", return_value="ok"):
+            with patch("lambda_handler._send_whatsapp", return_value=None):
+                with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+                    yield c
+
+
+@pytest.fixture()
+def wa_client_empty_secret():
+    """TestClient wired to lambda_handler.app with WHATSAPP_APP_SECRET empty."""
+    import lambda_handler
+
+    with patch("lambda_handler.WHATSAPP_APP_SECRET", ""):
+        with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+            yield c
+
+
+class TestWhatsAppSignatureVerification:
+    """Regression tests for fail-closed WhatsApp HMAC signature validation."""
+
+    def test_empty_app_secret_rejects_webhook(self, wa_client_empty_secret):
+        """Regression: empty WHATSAPP_APP_SECRET must return 403, not accept any request.
+
+        This is the exact scenario that was silently bypassed before the fix.
+        """
+        resp = wa_client_empty_secret.post(
+            "/whatsapp/webhook",
+            content=_WA_BODY,
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": "sha256=deadbeef",
+            },
+        )
+        assert resp.status_code == 403
+
+    def test_empty_app_secret_no_header_rejects_webhook(self, wa_client_empty_secret):
+        """Empty secret with no signature header must also return 403."""
+        resp = wa_client_empty_secret.post(
+            "/whatsapp/webhook",
+            content=_WA_BODY,
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 403
+
+    def test_valid_signature_accepted(self, wa_client_configured):
+        """Valid HMAC-SHA256 signature with configured secret must be accepted."""
+        sig = _make_wa_signature(_WA_SECRET, _WA_BODY)
+        resp = wa_client_configured.post(
+            "/whatsapp/webhook",
+            content=_WA_BODY,
+            headers={"Content-Type": "application/json", "X-Hub-Signature-256": sig},
+        )
+        assert resp.status_code == 200
+
+    def test_invalid_signature_rejected(self, wa_client_configured):
+        """Wrong HMAC digest must return 403."""
+        resp = wa_client_configured.post(
+            "/whatsapp/webhook",
+            content=_WA_BODY,
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": "sha256=wrongdigest",
+            },
+        )
+        assert resp.status_code == 403
+
+    def test_missing_signature_header_rejected(self, wa_client_configured):
+        """Absent X-Hub-Signature-256 header must return 403, not crash."""
+        resp = wa_client_configured.post(
+            "/whatsapp/webhook",
+            content=_WA_BODY,
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 403
+
+    def test_malformed_header_no_sha256_prefix_rejected(self, wa_client_configured):
+        """Header without 'sha256=' prefix must return 403, not crash."""
+        # Provide the raw hex without the expected prefix
+        raw_hex = hmac.new(_WA_SECRET.encode(), _WA_BODY, hashlib.sha256).hexdigest()
+        resp = wa_client_configured.post(
+            "/whatsapp/webhook",
+            content=_WA_BODY,
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": raw_hex,  # missing "sha256=" prefix
+            },
+        )
+        assert resp.status_code == 403

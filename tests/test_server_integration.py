@@ -3,12 +3,24 @@
 Valida endpoints HTTP, webhook de WhatsApp y flujos conversacionales
 completos usando TestClient con mock de canales externos.
 """
+import hashlib
+import hmac
 import json
 import pytest
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from config import WHATSAPP_VERIFY_TOKEN
 from tests.conftest import TEST_USER
+
+# Test secret used to sign integration-test payloads.
+_TEST_WA_SECRET = "integration-test-whatsapp-secret"
+
+
+def _sign_payload(body: bytes, secret: str = _TEST_WA_SECRET) -> str:
+    """Return a valid X-Hub-Signature-256 header value for the given body."""
+    digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
 
 
 class TestHealthEndpoint:
@@ -59,10 +71,29 @@ class TestWhatsAppWebhookVerification:
 
 
 class TestWhatsAppWebhookMessage:
+    """Integration tests for POST /whatsapp/webhook.
+
+    All requests are sent with a valid HMAC-SHA256 signature to satisfy the
+    fail-closed signature check introduced in issue #22.
+    """
+
+    def _post_signed(self, client: TestClient, payload: dict) -> "Response":
+        """Serialize payload and POST it with a valid X-Hub-Signature-256 header."""
+        body = json.dumps(payload).encode()
+        return client.post(
+            "/whatsapp/webhook",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": _sign_payload(body),
+            },
+        )
+
     def test_webhook_mensaje_saludo(self, client: TestClient, mock_whatsapp_send):
         """POST con 'menu' dispara bienvenida como respuesta."""
-        payload = self._build_whatsapp_payload(TEST_USER, "menu")
-        resp = client.post("/whatsapp/webhook", json=payload)
+        with patch("channels.whatsapp_bot.WHATSAPP_APP_SECRET", _TEST_WA_SECRET):
+            payload = self._build_whatsapp_payload(TEST_USER, "menu")
+            resp = self._post_signed(client, payload)
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
 
@@ -84,7 +115,8 @@ class TestWhatsAppWebhookMessage:
                 }]
             }]
         }
-        resp = client.post("/whatsapp/webhook", json=payload)
+        with patch("channels.whatsapp_bot.WHATSAPP_APP_SECRET", _TEST_WA_SECRET):
+            resp = self._post_signed(client, payload)
         assert resp.status_code == 200
         assert len(mock_whatsapp_send) == 0
 
@@ -97,32 +129,31 @@ class TestWhatsAppWebhookMessage:
                 }]
             }]
         }
-        resp = client.post("/whatsapp/webhook", json=payload)
+        with patch("channels.whatsapp_bot.WHATSAPP_APP_SECRET", _TEST_WA_SECRET):
+            resp = self._post_signed(client, payload)
         assert resp.status_code == 200
         assert len(mock_whatsapp_send) == 0
 
     def test_payload_invalido(self, client: TestClient, mock_whatsapp_send):
-        """Payload malformado no causa crash."""
-        resp = client.post("/whatsapp/webhook", json={})
+        """Payload malformado (missing keys) does not crash; returns 200 after sig check."""
+        with patch("channels.whatsapp_bot.WHATSAPP_APP_SECRET", _TEST_WA_SECRET):
+            resp = self._post_signed(client, {})
         assert resp.status_code == 200
 
     def test_webhook_mantiene_sesion(self, client: TestClient, mock_whatsapp_send):
         """Múltiples mensajes mantienen estado de conversación."""
-        payloads = [
-            self._build_whatsapp_payload(TEST_USER, "menu"),
-            self._build_whatsapp_payload(TEST_USER, "1"),
-        ]
-        for p in payloads:
-            client.post("/whatsapp/webhook", json=p)
+        with patch("channels.whatsapp_bot.WHATSAPP_APP_SECRET", _TEST_WA_SECRET):
+            for texto in ["menu", "1"]:
+                self._post_signed(client, self._build_whatsapp_payload(TEST_USER, texto))
 
         assert len(mock_whatsapp_send) >= 2
         assert "servicio" in mock_whatsapp_send[1]["text"].lower() or "consulta" in mock_whatsapp_send[1]["text"].lower()
 
     def test_ciclo_completo_agendamiento(self, client: TestClient, mock_whatsapp_send):
         """Flujo completo de agendamiento vía webhook WhatsApp."""
-        mensajes = ["menu", "1", "1", "1", "1", "Juan Pérez", "si"]
-        for texto in mensajes:
-            client.post("/whatsapp/webhook", json=self._build_whatsapp_payload(TEST_USER, texto))
+        with patch("channels.whatsapp_bot.WHATSAPP_APP_SECRET", _TEST_WA_SECRET):
+            for texto in ["menu", "1", "1", "1", "1", "Juan Pérez", "si"]:
+                self._post_signed(client, self._build_whatsapp_payload(TEST_USER, texto))
 
         textos_enviados = [m["text"] for m in mock_whatsapp_send]
         ultimo = textos_enviados[-1] if textos_enviados else ""
@@ -130,12 +161,13 @@ class TestWhatsAppWebhookMessage:
 
     def test_ciclo_completo_cancelacion(self, client: TestClient, mock_whatsapp_send):
         """Flujo completo: agendar → cancelar."""
-        for texto in ["menu", "1", "1", "1", "1", "Juan Pérez", "si"]:
-            client.post("/whatsapp/webhook", json=self._build_whatsapp_payload(TEST_USER, texto))
+        with patch("channels.whatsapp_bot.WHATSAPP_APP_SECRET", _TEST_WA_SECRET):
+            for texto in ["menu", "1", "1", "1", "1", "Juan Pérez", "si"]:
+                self._post_signed(client, self._build_whatsapp_payload(TEST_USER, texto))
 
-        mock_whatsapp_send.clear()
-        for texto in ["menu", "3", "1", "si"]:
-            client.post("/whatsapp/webhook", json=self._build_whatsapp_payload(TEST_USER, texto))
+            mock_whatsapp_send.clear()
+            for texto in ["menu", "3", "1", "si"]:
+                self._post_signed(client, self._build_whatsapp_payload(TEST_USER, texto))
 
         textos = [m["text"] for m in mock_whatsapp_send]
         assert any("cancelada" in t.lower() for t in textos)

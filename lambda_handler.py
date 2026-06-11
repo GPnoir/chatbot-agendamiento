@@ -258,8 +258,24 @@ async function render(){
 
 # ── WhatsApp ──────────────────────────────────────────────────────────
 def _verify_whatsapp_signature(payload: bytes, signature: str) -> bool:
+    """Verify X-Hub-Signature-256 HMAC against WHATSAPP_APP_SECRET.
+
+    Fails closed: returns False when the secret is not configured or the
+    signature header is missing or malformed. Never logs the payload, the
+    signature value, or any secret.
+    """
+    import logging
+    logger = logging.getLogger()
+
     if not WHATSAPP_APP_SECRET:
-        return True
+        logger.error("WHATSAPP_APP_SECRET not configured; rejecting webhook")
+        return False
+
+    # Guard against a missing or malformed header (no "sha256=" prefix).
+    if not signature or not signature.startswith("sha256="):
+        logger.warning("WhatsApp webhook: missing or malformed X-Hub-Signature-256 header")
+        return False
+
     expected = "sha256=" + hmac.new(
         WHATSAPP_APP_SECRET.encode(), payload, hashlib.sha256
     ).hexdigest()
