@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request, Response
 
 import chatbot
 from config import WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET
+from input_validation import validate_whatsapp_payload, validate_message_text
 
 logger = logging.getLogger(__name__)
 
@@ -70,17 +71,22 @@ async def receive_message(request: Request):
     try:
         import json
         data = json.loads(body)
-        entry = data["entry"][0]
-        changes = entry["changes"][0]
-        value = changes["value"]
-        if "messages" not in value:
+        if not validate_whatsapp_payload(data):
             return {"status": "ok"}
-        message = value["messages"][0]
+        message = data["entry"][0]["changes"][0]["value"]["messages"][0]
         if message["type"] != "text":
             return {"status": "ok"}
         from_number = message["from"]
-        text = message["text"]["body"]
-        response = chatbot.handle_message("whatsapp", from_number, text)
+        raw_text = message["text"]["body"]
+        clean = validate_message_text(raw_text)
+        if clean is None:
+            if raw_text and len(raw_text.strip()) > 0:
+                await send_message(
+                    from_number,
+                    "Tu mensaje es demasiado largo (máximo 500 caracteres).",
+                )
+            return {"status": "ok"}
+        response = chatbot.handle_message("whatsapp", from_number, clean)
         await send_message(from_number, response)
     except (KeyError, IndexError, ValueError):
         pass

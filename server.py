@@ -7,8 +7,10 @@ import database as db
 from channels.whatsapp_bot import router as whatsapp_router
 from channels.telegram_bot import create_telegram_app
 from config import WEBHOOK_URL, TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET
+from input_validation import add_security_middleware, validate_telegram_payload, validate_message_text
 
 app = FastAPI(title="Chatbot Agendamiento")
+add_security_middleware(app)
 app.include_router(whatsapp_router)
 
 telegram_app = None
@@ -40,7 +42,31 @@ async def telegram_webhook(request: Request):
     if secret != TELEGRAM_WEBHOOK_SECRET:
         return JSONResponse(status_code=403, content={"error": "forbidden"})
     data = await request.json()
-    update = Update.de_json(data, telegram_app.bot)
+    if not validate_telegram_payload(data):
+        return {"status": "ok"}
+    msg = data["message"]
+    text = msg.get("text", "")
+    clean = validate_message_text(text)
+    if clean is None:
+        if text and len(text.strip()) > 0:
+            # Oversized message — notify user; skip processing
+            import httpx
+            chat_id = msg["chat"]["id"]
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.post(url, json={
+                        "chat_id": chat_id,
+                        "text": "Tu mensaje es demasiado largo (máximo 500 caracteres).",
+                    })
+            except Exception:
+                pass
+        return {"status": "ok"}
+    # Build a sanitized copy so python-telegram-bot processes clean text
+    import copy
+    clean_data = copy.deepcopy(data)
+    clean_data["message"]["text"] = clean
+    update = Update.de_json(clean_data, telegram_app.bot)
     await telegram_app.process_update(update)
     return {"status": "ok"}
 
