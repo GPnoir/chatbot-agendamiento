@@ -32,28 +32,142 @@ async def health():
 
 
 @app.get("/admin/agenda")
-async def admin_agenda(fecha: str = None, token: str = None):
-    """API JSON de la agenda. Protegido por token."""
+async def admin_agenda(fecha: str = None, desde: str = None, hasta: str = None, token: str = None):
+    """API JSON de la agenda. Soporta fecha única o rango (desde/hasta). Incluye datos del cliente."""
     if token != TELEGRAM_WEBHOOK_SECRET:
         return JSONResponse(status_code=403, content={"error": "forbidden"})
-    from datetime import date as d
+    from datetime import date as d, timedelta
     from decimal import Decimal
-    fecha = fecha or d.today().isoformat()
+
+    if desde and hasta:
+        fechas = []
+        current = d.fromisoformat(desde)
+        end = d.fromisoformat(hasta)
+        while current <= end:
+            fechas.append(current.isoformat())
+            current += timedelta(days=1)
+    else:
+        fechas = [fecha or d.today().isoformat()]
+
     table = db.get_table()
-    resp = table.scan(
-        FilterExpression="begins_with(PK, :p) AND fecha = :f AND estado = :e",
-        ExpressionAttributeValues={":p": "APPOINTMENT#", ":f": fecha, ":e": "confirmada"},
-    )
-    citas = sorted(resp["Items"], key=lambda x: x["hora"])
-    result = [{k: (int(v) if isinstance(v, Decimal) else v) for k, v in c.items()
-               if k not in ("PK", "SK", "GSI1PK", "GSI1SK")} for c in citas]
-    return {"fecha": fecha, "total": len(result), "citas": result}
+    all_citas = []
+    for f in fechas:
+        resp = table.scan(
+            FilterExpression="begins_with(PK, :p) AND fecha = :f AND estado = :e",
+            ExpressionAttributeValues={":p": "APPOINTMENT#", ":f": f, ":e": "confirmada"},
+        )
+        all_citas.extend(resp["Items"])
+
+    # Enriquecer con datos del cliente
+    clientes_cache = {}
+    result = []
+    for c in sorted(all_citas, key=lambda x: (x["fecha"], x["hora"])):
+        cid = c.get("cliente_id", "")
+        if cid and cid not in clientes_cache:
+            cli_resp = table.get_item(Key={"PK": "CLIENT", "SK": cid})
+            clientes_cache[cid] = cli_resp.get("Item", {})
+        cli = clientes_cache.get(cid, {})
+        item = {k: (int(v) if isinstance(v, Decimal) else v) for k, v in c.items()
+                if k not in ("PK", "SK", "GSI1PK", "GSI1SK")}
+        item["cliente_nombre"] = cli.get("nombre", "")
+        item["cliente_canal"] = cli.get("canal", "")
+        item["cliente_contacto"] = cli.get("canal_user_id", "")
+        result.append(item)
+
+    return {"fechas": fechas, "total": len(result), "citas": result}
 
 
 @app.get("/admin/panel")
 async def admin_panel():
-    """Panel HTML para ver agenda."""
-    html = '<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agenda</title><style>body{font-family:system-ui;max-width:600px;margin:0 auto;padding:20px;background:#f5f5f5}h1{color:#2d5a27}.cita{background:#fff;padding:12px;margin:8px 0;border-radius:8px;border-left:4px solid #4caf50}.hora{font-weight:bold;font-size:1.2em;color:#2d5a27}.vacia{color:#888;text-align:center;padding:40px}input[type=date]{padding:8px;border-radius:4px;border:1px solid #ccc;font-size:1em}</style></head><body><h1>🌸 Agenda</h1><input type="date" id="fecha" onchange="cargar()"><div id="citas"></div><script>const T=new URLSearchParams(location.search).get("token")||"";document.getElementById("fecha").valueAsDate=new Date();async function cargar(){const f=document.getElementById("fecha").value;const r=await fetch(location.origin+"/Prod/admin/agenda?fecha="+f+"&token="+T);const d=await r.json();if(!d.citas||d.citas.length===0){document.getElementById("citas").innerHTML="<p class=vacia>Sin citas</p>";return}document.getElementById("citas").innerHTML=d.citas.map(c=>"<div class=cita><span class=hora>"+c.hora+"</span> - "+(c.servicio_nombre||"Consulta")+"</div>").join("")}cargar()</script></body></html>'
+    """Panel HTML - vista calendario semanal con detalle por hora y datos de contacto."""
+    html = """<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agenda - Centro de Flores de Bach</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#f0f4f0;color:#333;padding:16px}
+.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px}
+h1{color:#2d5a27;font-size:1.4em}
+.nav{display:flex;gap:8px;align-items:center}
+.nav button{background:#4caf50;color:#fff;border:none;border-radius:6px;padding:8px 14px;cursor:pointer;font-size:.9em}
+.nav button:hover{background:#388e3c}
+.nav span{font-weight:600;min-width:180px;text-align:center}
+.calendar{display:grid;grid-template-columns:60px repeat(var(--days),1fr);gap:1px;background:#ddd;border-radius:8px;overflow:hidden}
+.cal-header{background:#2d5a27;color:#fff;padding:8px 4px;text-align:center;font-size:.75em;font-weight:600}
+.cal-hour{background:#f9f9f9;padding:4px;font-size:.7em;color:#666;text-align:center;display:flex;align-items:center;justify-content:center;min-height:48px}
+.cal-cell{background:#fff;min-height:48px;padding:2px;position:relative}
+.cita{background:#e8f5e9;border-left:3px solid #4caf50;border-radius:4px;padding:4px 6px;margin:1px 0;font-size:.7em;cursor:pointer;overflow:hidden}
+.cita:hover{background:#c8e6c9}
+.cita .nombre{font-weight:600;color:#2d5a27}
+.cita .servicio{color:#555}
+.cita .contacto{color:#1565c0;font-size:.9em}
+.hoy{background:#f1f8e9}
+.weekend{background:#fafafa}
+.cerrado{background:#f5f5f5;color:#bbb;display:flex;align-items:center;justify-content:center;font-size:.7em}
+@media(max-width:768px){.calendar{grid-template-columns:40px repeat(var(--days),1fr)}.cal-header,.cal-hour{font-size:.65em}.cita{font-size:.6em}}
+</style></head><body>
+<div class="header"><h1>🌸 Agenda</h1>
+<div class="nav"><button onclick="semana(-1)">◀ Anterior</button><span id="rango"></span><button onclick="semana(1)">Siguiente ▶</button></div></div>
+<div class="calendar" id="cal" style="--days:7"></div>
+<script>
+const T=new URLSearchParams(location.search).get("token")||"";
+const HORARIOS={0:{i:9,f:18},1:{i:9,f:18},2:{i:9,f:18},3:{i:9,f:18},4:{i:9,f:17},5:{i:9,f:13}};
+const DIAS=["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"];
+let offset=0;
+
+function lunes(d){const r=new Date(d);const day=r.getDay();r.setDate(r.getDate()-((day+6)%7));return r}
+function fmt(d){return d.toISOString().slice(0,10)}
+function semana(dir){offset+=dir;render()}
+
+async function render(){
+  const hoy=new Date();
+  const base=lunes(hoy);
+  base.setDate(base.getDate()+offset*7);
+  const dias=[];
+  for(let i=0;i<7;i++){const d=new Date(base);d.setDate(d.getDate()+i);dias.push(d)}
+  const desde=fmt(dias[0]),hasta=fmt(dias[6]);
+  document.getElementById("rango").textContent=desde.slice(5)+" → "+hasta.slice(5);
+
+  const r=await fetch(location.origin+"/Prod/admin/agenda?desde="+desde+"&hasta="+hasta+"&token="+T);
+  const data=await r.json();
+  const citasMap={};
+  (data.citas||[]).forEach(c=>{const k=c.fecha+"#"+c.hora;if(!citasMap[k])citasMap[k]=[];citasMap[k].push(c)});
+
+  // Determinar rango de horas (9-18 max)
+  const minH=9,maxH=18;
+  let html="<div class='cal-header'></div>";
+  dias.forEach((d,i)=>{
+    const dn=DIAS[d.getDay()===0?6:d.getDay()-1];
+    const dd=d.getDate()+"/"+(d.getMonth()+1);
+    const esHoy=fmt(d)===fmt(hoy)?" ⬤":"";
+    html+="<div class='cal-header'>"+dn+"<br>"+dd+esHoy+"</div>";
+  });
+
+  for(let h=minH;h<maxH;h++){
+    for(let m=0;m<60;m+=30){
+      const hStr=String(h).padStart(2,"0")+":"+String(m).padStart(2,"0");
+      html+="<div class='cal-hour'>"+hStr+"</div>";
+      dias.forEach((d,i)=>{
+        const dw=d.getDay();
+        const horario=HORARIOS[dw===0?6:dw-1];
+        const esHoyClass=fmt(d)===fmt(hoy)?" hoy":"";
+        if(!horario||(h<horario.i)||(h>=horario.f)){
+          html+="<div class='cal-cell cerrado"+esHoyClass+"'>—</div>";return;
+        }
+        const key=fmt(d)+"#"+hStr;
+        const citas=citasMap[key]||[];
+        html+="<div class='cal-cell"+esHoyClass+"'>";
+        citas.forEach(c=>{
+          const contacto=c.cliente_canal==="telegram"?"@tg:"+c.cliente_contacto:c.cliente_canal==="whatsapp"?"+"+c.cliente_contacto:c.cliente_contacto;
+          html+="<div class='cita'><div class='nombre'>"+(c.cliente_nombre||"Sin nombre")+"</div><div class='servicio'>"+(c.servicio_nombre||"Consulta")+" ("+((c.servicio_duracion||60))+"min)</div><div class='contacto'>"+contacto+"</div></div>";
+        });
+        html+="</div>";
+      });
+    }
+  }
+  document.getElementById("cal").innerHTML=html;
+}
+render();
+</script></body></html>"""
     return Response(content=html, media_type="text/html")
 
 
