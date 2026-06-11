@@ -40,9 +40,14 @@ def _check_admin_auth(request: Request) -> bool:
     if not ADMIN_API_KEY:
         return False
     auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
+    if not auth_header:
         return False
-    presented = auth_header[len("Bearer "):]
+    scheme, _, credentials = auth_header.partition(" ")
+    if scheme.lower() != "bearer":
+        return False
+    presented = credentials.lstrip(" ")
+    if not presented:
+        return False
     return hmac.compare_digest(presented, ADMIN_API_KEY)
 
 
@@ -146,6 +151,7 @@ h1{color:#2d5a27;font-size:1.4em}
 </div>
 <div class="calendar" id="cal" style="--days:7;display:none"></div>
 <script>
+function esc(s){const d=document.createElement("div");d.appendChild(document.createTextNode(s||""));return d.innerHTML}
 const HORARIOS={0:{i:9,f:18},1:{i:9,f:18},2:{i:9,f:18},3:{i:9,f:18},4:{i:9,f:17},5:{i:9,f:13}};
 const DIAS=["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"];
 let offset=0;
@@ -163,8 +169,9 @@ function doLogin(){
 document.getElementById("api-key-input").addEventListener("keydown",e=>{if(e.key==="Enter")doLogin()});
 
 async function verifyKey(k){
+  const base=location.pathname.replace(/[/]admin[/]panel[/]?$/,"");
   const today=new Date();
-  const r=await fetch(location.origin+"/Prod/admin/agenda?fecha="+fmt(today),{
+  const r=await fetch(base+"/admin/agenda?fecha="+fmt(today),{
     headers:{"Authorization":"Bearer "+k}
   });
   if(r.ok){
@@ -187,15 +194,16 @@ async function verifyKey(k){
 })();
 
 async function render(){
+  const base=location.pathname.replace(/[/]admin[/]panel[/]?$/,"");
   const hoy=new Date();
-  const base=lunes(hoy);
-  base.setDate(base.getDate()+offset*7);
+  const lun=lunes(hoy);
+  lun.setDate(lun.getDate()+offset*7);
   const dias=[];
-  for(let i=0;i<7;i++){const d=new Date(base);d.setDate(d.getDate()+i);dias.push(d)}
+  for(let i=0;i<7;i++){const d=new Date(lun);d.setDate(d.getDate()+i);dias.push(d)}
   const desde=fmt(dias[0]),hasta=fmt(dias[6]);
   document.getElementById("rango").textContent=desde.slice(5)+" → "+hasta.slice(5);
 
-  const r=await fetch(location.origin+"/Prod/admin/agenda?desde="+desde+"&hasta="+hasta,{
+  const r=await fetch(base+"/admin/agenda?desde="+desde+"&hasta="+hasta,{
     headers:{"Authorization":"Bearer "+apiKey}
   });
   if(r.status===401||r.status===403){
@@ -235,8 +243,8 @@ async function render(){
         const citas=citasMap[key]||[];
         html+="<div class='cal-cell"+esHoyClass+"'>";
         citas.forEach(c=>{
-          const contacto=c.cliente_canal==="telegram"?"@tg:"+c.cliente_contacto:c.cliente_canal==="whatsapp"?"+"+c.cliente_contacto:c.cliente_contacto;
-          html+="<div class='cita'><div class='nombre'>"+(c.cliente_nombre||"Sin nombre")+"</div><div class='servicio'>"+(c.servicio_nombre||"Consulta")+" ("+((c.servicio_duracion||60))+"min)</div><div class='contacto'>"+contacto+"</div></div>";
+          const contactoRaw=c.cliente_canal==="telegram"?"@tg:"+c.cliente_contacto:c.cliente_canal==="whatsapp"?"+"+c.cliente_contacto:c.cliente_contacto;
+          html+="<div class='cita'><div class='nombre'>"+esc(c.cliente_nombre||"Sin nombre")+"</div><div class='servicio'>"+esc(c.servicio_nombre||"Consulta")+" ("+esc(String(c.servicio_duracion||60))+"min)</div><div class='contacto'>"+esc(contactoRaw)+"</div></div>";
         });
         html+="</div>";
       });

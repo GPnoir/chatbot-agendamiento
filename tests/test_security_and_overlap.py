@@ -19,20 +19,6 @@ from tests.conftest import TEST_USER
 VALID_KEY = "test-admin-key-secure-12345"
 
 
-def _make_admin_client(admin_api_key: str = VALID_KEY):
-    """Return a TestClient for lambda_handler.app with ADMIN_API_KEY patched."""
-    import config
-    import lambda_handler
-
-    # Re-import to pick up patched config
-    with patch.object(config, "ADMIN_API_KEY", admin_api_key):
-        # lambda_handler imports ADMIN_API_KEY at module level via config, so
-        # we patch it in lambda_handler's namespace directly too.
-        with patch("lambda_handler.ADMIN_API_KEY", admin_api_key):
-            client = TestClient(lambda_handler.app, raise_server_exceptions=True)
-            yield client
-
-
 @pytest.fixture()
 def lambda_client():
     """TestClient wired to lambda_handler.app with a known ADMIN_API_KEY."""
@@ -116,6 +102,15 @@ class TestAdminAgendaAuth:
         )
         assert resp.status_code in (401, 403)
 
+    def test_lowercase_bearer_scheme_accepted(self, lambda_client):
+        """RFC 9110: bearer scheme is case-insensitive; 'bearer <key>' must be accepted."""
+        with patch("lambda_handler.db.get_table", return_value=_mock_db_scan()):
+            resp = lambda_client.get(
+                "/admin/agenda",
+                headers={"Authorization": f"bearer {VALID_KEY}"},
+            )
+        assert resp.status_code == 200
+
 
 class TestAdminPanelAuth:
     """Tests for /admin/panel — must serve login shell, never appointment data."""
@@ -139,7 +134,7 @@ class TestAdminPanelAuth:
         assert "login-overlay" in html
         assert "sessionStorage" in html
         # Calendar grid starts hidden — no pre-rendered appointment divs
-        assert 'style="--days:7;display:none"' in html or "display:none" in html
+        assert 'style="--days:7;display:none"' in html
 
     def test_panel_contains_no_secret_in_html(self, lambda_client):
         """Panel HTML must not embed ADMIN_API_KEY or any secret value."""
