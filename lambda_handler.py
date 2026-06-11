@@ -2,6 +2,7 @@
 import json
 import hashlib
 import hmac
+import logging
 import os
 
 import httpx
@@ -15,6 +16,8 @@ from config import (
     WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN,
     WHATSAPP_APP_SECRET, TELEGRAM_WEBHOOK_SECRET, ADMIN_API_KEY,
 )
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Chatbot Agendamiento Lambda")
 
@@ -264,9 +267,6 @@ def _verify_whatsapp_signature(payload: bytes, signature: str) -> bool:
     signature header is missing or malformed. Never logs the payload, the
     signature value, or any secret.
     """
-    import logging
-    logger = logging.getLogger()
-
     if not WHATSAPP_APP_SECRET:
         logger.error("WHATSAPP_APP_SECRET not configured; rejecting webhook")
         return False

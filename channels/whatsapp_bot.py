@@ -1,12 +1,15 @@
 """Adaptador para WhatsApp via Meta Cloud API."""
 import hashlib
 import hmac
+import logging
 
 import httpx
 from fastapi import APIRouter, Request, Response
 
 import chatbot
 from config import WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/whatsapp")
 META_API_URL = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
@@ -18,9 +21,6 @@ def verify_signature(payload: bytes, signature: str) -> bool:
     Fails closed: returns False when the secret is not configured or the
     signature header is missing or malformed. Never logs secrets or payload.
     """
-    import logging
-    logger = logging.getLogger(__name__)
-
     if not WHATSAPP_APP_SECRET:
         logger.error("WHATSAPP_APP_SECRET not configured; rejecting webhook")
         return False
