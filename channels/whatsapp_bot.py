@@ -8,7 +8,7 @@ from fastapi import APIRouter, Request, Response
 
 import chatbot
 from config import WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET
-from input_validation import validate_whatsapp_payload, validate_message_text
+from input_validation import validate_whatsapp_payload, validate_message_text, is_oversized
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ async def receive_message(request: Request):
         raw_text = message["text"]["body"]
         clean = validate_message_text(raw_text)
         if clean is None:
-            if raw_text and len(raw_text.strip()) > 0:
+            if is_oversized(raw_text):
                 await send_message(
                     from_number,
                     "Tu mensaje es demasiado largo (máximo 500 caracteres).",

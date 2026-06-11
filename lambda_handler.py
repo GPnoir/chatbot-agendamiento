@@ -21,6 +21,7 @@ from input_validation import (
     validate_telegram_payload,
     validate_whatsapp_payload,
     validate_message_text,
+    is_oversized,
 )
 
 logger = logging.getLogger(__name__)
@@ -328,7 +329,7 @@ async def whatsapp_message(request: Request):
         raw_text = message["text"]["body"]
         clean = validate_message_text(raw_text)
         if clean is None:
-            if raw_text and len(raw_text.strip()) > 0:
+            if is_oversized(raw_text):
                 await _send_whatsapp(
                     from_number,
                     "Tu mensaje es demasiado largo (máximo 500 caracteres).",
@@ -360,7 +361,7 @@ async def telegram_webhook(request: Request):
     chat_id = msg["chat"]["id"]
     clean = validate_message_text(raw_text)
     if clean is None:
-        if raw_text and len(raw_text.strip()) > 0:
+        if is_oversized(raw_text):
             logger.info("Telegram: message too long, sending rejection")
             await _send_telegram(
                 chat_id,

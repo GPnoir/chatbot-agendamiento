@@ -39,6 +39,16 @@ def sanitize_text(text: str) -> str:
     return text
 
 
+def is_oversized(text: object) -> bool:
+    """Return True when *text* is a str whose sanitized form exceeds MAX_MESSAGE_LENGTH.
+
+    Distinguishes genuinely-oversized input from garbage that sanitizes to empty
+    (e.g. all C0 control characters), enabling callers to send a rejection reply
+    only for the former and silently skip the latter.
+    """
+    return isinstance(text, str) and len(sanitize_text(text)) > MAX_MESSAGE_LENGTH
+
+
 def validate_message_text(text: object) -> Optional[str]:
     """Validate and sanitize an incoming message text value.
 
@@ -171,8 +181,9 @@ def add_security_middleware(app: ASGIApp, max_body_bytes: int = 1_048_576) -> No
     allow_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
     # Starlette applies middleware in reverse-registration order (last added
-    # wraps outermost).  We add CORS first so size-limit runs before CORS
-    # parsing — oversized requests are rejected before CORS headers are emitted.
+    # wraps outermost / runs first).  We add body-size limit LAST so it becomes
+    # the outermost layer and runs FIRST — oversized requests are rejected before
+    # CORS parsing or any route handler is reached.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allow_origins,

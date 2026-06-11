@@ -355,7 +355,13 @@ class TestRateLimiter:
 
 class TestInputSanitization:
     def test_mensaje_largo_truncado(self, fresh_db):
-        """Mensajes de más de 500 chars se truncan sin error."""
+        """Chatbot-internal truncation resilience (defense in depth).
+
+        Passes a long string directly to chatbot.handle_message (bypassing
+        handler-level validation) to verify the chatbot layer does not crash.
+        Handler-level rejection behavior (sending the Spanish reply and returning
+        early) is covered by TestOversizedMessageRejection.
+        """
         texto_largo = "a" * 1000
         resp = chatbot.handle_message("test", TEST_USER, texto_largo)
         # No debe crashear, debe retornar bienvenida (texto no es comando válido)
@@ -873,15 +879,20 @@ class TestCORSMiddleware:
         from fastapi import FastAPI
         from starlette.middleware.cors import CORSMiddleware
         from input_validation import add_security_middleware
+        import importlib, config as cfg_mod, input_validation as iv_mod
 
         fresh_app = FastAPI()
         with patch.dict("os.environ", {"CORS_ORIGINS": "https://example.com"}):
             # Reload config so CORS_ORIGINS is picked up
-            import importlib, config as cfg_mod
             importlib.reload(cfg_mod)
-            import input_validation as iv_mod
             importlib.reload(iv_mod)
-            iv_mod.add_security_middleware(fresh_app)
+            try:
+                iv_mod.add_security_middleware(fresh_app)
+            finally:
+                # Restore both modules to pristine state so subsequent tests
+                # see the original CORS_ORIGINS value.
+                importlib.reload(cfg_mod)
+                importlib.reload(iv_mod)
 
         middleware_classes = [m.cls for m in fresh_app.user_middleware]
         assert CORSMiddleware in middleware_classes
@@ -1102,3 +1113,70 @@ class TestOversizedMessageRejection:
         args = mock_send.call_args[0]
         sent_text = args[1] if len(args) >= 2 else mock_send.call_args.kwargs.get("text", "")
         assert "largo" in sent_text or "500" in sent_text
+
+
+# ---------------------------------------------------------------------------
+# Production-app body size limit and CORS preflight tests (F2)
+# ---------------------------------------------------------------------------
+
+_OVERSIZED_BODY = b"x" * 1_048_577
+
+
+class TestProductionAppBodyLimit:
+    """Body > 1 MiB must be rejected with 413 by the real production app stacks."""
+
+    def test_lambda_handler_app_rejects_oversized_body(self):
+        """lambda_handler.app must return 413 for a 1_048_577-byte POST body."""
+        import lambda_handler
+        with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+            resp = c.post(
+                "/whatsapp/webhook",
+                content=_OVERSIZED_BODY,
+                headers={"Content-Type": "application/octet-stream"},
+            )
+        assert resp.status_code == 413
+
+    def test_server_app_rejects_oversized_body(self):
+        """server.app must return 413 for a 1_048_577-byte POST body."""
+        import server as server_module
+        server_module.app.router.on_startup.clear()
+        server_module.app.router.on_shutdown.clear()
+        with TestClient(server_module.app, raise_server_exceptions=True) as c:
+            resp = c.post(
+                "/whatsapp/webhook",
+                content=_OVERSIZED_BODY,
+                headers={"Content-Type": "application/octet-stream"},
+            )
+        assert resp.status_code == 413
+
+
+class TestProductionAppCORSPreflight:
+    """OPTIONS preflight from an unlisted origin must not echo allow-origin header."""
+
+    def test_lambda_handler_app_no_cors_for_evil_origin(self):
+        """lambda_handler.app must not return access-control-allow-origin for evil origin."""
+        import lambda_handler
+        with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+            resp = c.options(
+                "/whatsapp/webhook",
+                headers={
+                    "Origin": "https://evil.example",
+                    "Access-Control-Request-Method": "POST",
+                },
+            )
+        assert "access-control-allow-origin" not in resp.headers
+
+    def test_server_app_no_cors_for_evil_origin(self):
+        """server.app must not return access-control-allow-origin for evil origin."""
+        import server as server_module
+        server_module.app.router.on_startup.clear()
+        server_module.app.router.on_shutdown.clear()
+        with TestClient(server_module.app, raise_server_exceptions=True) as c:
+            resp = c.options(
+                "/whatsapp/webhook",
+                headers={
+                    "Origin": "https://evil.example",
+                    "Access-Control-Request-Method": "POST",
+                },
+            )
+        assert "access-control-allow-origin" not in resp.headers
