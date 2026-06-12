@@ -16,6 +16,7 @@ Globals:
         WHATSAPP_PHONE_NUMBER_ID: !Ref WhatsAppPhoneNumberId
         WHATSAPP_VERIFY_TOKEN: !Ref WhatsAppVerifyToken
         WHATSAPP_APP_SECRET: !Ref WhatsAppAppSecret
+        ADMIN_API_KEY: !Ref AdminApiKey
 
 Parameters:
   TelegramBotToken:
@@ -35,6 +36,10 @@ Parameters:
     NoEcho: true
     Default: mi_token_secreto
   WhatsAppAppSecret:
+    Type: String
+    NoEcho: true
+    Default: ''
+  AdminApiKey:
     Type: String
     NoEcho: true
     Default: ''
