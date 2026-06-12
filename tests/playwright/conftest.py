@@ -4,6 +4,8 @@ Configura un servidor FastAPI mínimo (sin Telegram) que permite
 probar la API y el flujo conversacional vía webhook de WhatsApp.
 """
 import asyncio
+import hashlib
+import hmac
 import os
 import threading
 from typing import AsyncGenerator, Generator, List
@@ -13,7 +15,18 @@ import uvicorn
 from fastapi import FastAPI
 from playwright.sync_api import APIRequestContext, Playwright
 
-from config import HOST, PORT, WHATSAPP_VERIFY_TOKEN
+from config import HOST, PORT
+
+# ── E2E test credentials (never use production secrets in tests) ────────
+E2E_WHATSAPP_APP_SECRET = "pw-e2e-app-secret"
+E2E_WHATSAPP_VERIFY_TOKEN = "pw-e2e-verify-token"
+
+
+def sign_payload(body: bytes) -> str:
+    """Compute X-Hub-Signature-256 for body using E2E test secret."""
+    digest = hmac.new(E2E_WHATSAPP_APP_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
 
 # ── Módulo de captura para respuestas del chatbot ──────────────────────
 chatbot_responses: List[dict] = []
@@ -29,6 +42,8 @@ def build_test_app():
     import database as db_module
 
     wb.send_message = _fake_whatsapp_send
+    wb.WHATSAPP_APP_SECRET = E2E_WHATSAPP_APP_SECRET
+    wb.WHATSAPP_VERIFY_TOKEN = E2E_WHATSAPP_VERIFY_TOKEN
 
     app = FastAPI(title="chatbot-agendamiento-test")
     app.include_router(wb.router)

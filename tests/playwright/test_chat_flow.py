@@ -6,6 +6,7 @@ chateando) y captura las respuestas que el bot intenta enviar.
 Depende del fixture chatbot_responses definido en conftest.py que
 captura los mensajes salientes mockeando send_message.
 """
+import json
 import sys
 from typing import List
 
@@ -13,7 +14,7 @@ import pytest
 from playwright.sync_api import APIRequestContext
 
 # Importamos la lista de captura del conftest
-from tests.playwright.conftest import chatbot_responses
+from tests.playwright.conftest import chatbot_responses, sign_payload
 
 TEST_USER = "pw_e2e_whatsapp_user"
 BASE_MSG_COUNT = 0
@@ -42,7 +43,15 @@ def _send(
 ) -> List[dict]:
     """Envía un mensaje como usuario y retorna las respuestas capturadas."""
     prev = len(chatbot_responses)
-    api.post("/whatsapp/webhook", data=_whatsapp_payload(user, text))
+    body = json.dumps(_whatsapp_payload(user, text)).encode()
+    api.post(
+        "/whatsapp/webhook",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Hub-Signature-256": sign_payload(body),
+        },
+    )
     return chatbot_responses[prev:]
 
 
