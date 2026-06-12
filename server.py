@@ -39,7 +39,8 @@ async def shutdown():
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    if secret != TELEGRAM_WEBHOOK_SECRET:
+    # Empty configured secret fails closed: reject everything
+    if not TELEGRAM_WEBHOOK_SECRET or secret != TELEGRAM_WEBHOOK_SECRET:
         return JSONResponse(status_code=403, content={"error": "forbidden"})
     data = await request.json()
     if not validate_telegram_payload(data):

@@ -26,7 +26,7 @@ Parameters:
   TelegramWebhookSecret:
     Type: String
     NoEcho: true
-    Default: telegram_secret_change_me
+    MinLength: 1
   WhatsAppToken:
     Type: String
     NoEcho: true
@@ -36,7 +36,7 @@ Parameters:
   WhatsAppVerifyToken:
     Type: String
     NoEcho: true
-    Default: mi_token_secreto
+    MinLength: 1
   WhatsAppAppSecret:
     Type: String
     NoEcho: true
