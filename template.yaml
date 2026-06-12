@@ -47,6 +47,7 @@ Parameters:
     Default: ''
   AlarmEmail:
     Type: String
+    NoEcho: true
     Default: ''
     Description: >
       Optional email address for alarm notifications. When empty, alarms are
@@ -203,6 +204,27 @@ Resources:
       AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
       OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
 
+  # Lambda: the scheduled ReminderFunction fails silently otherwise — no user
+  # ever sees its errors, so an alarm is the only feedback channel.
+  AlarmReminderErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-reminder-errors'
+      AlarmDescription: Lambda ReminderFunction raised at least one error in the last 5 minutes.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ReminderFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+
   # Lambda: throttles indicate concurrency pressure or burst-limit hits.
   AlarmLambdaThrottles:
     Type: AWS::CloudWatch::Alarm
@@ -337,6 +359,10 @@ Outputs:
   AlarmLambdaErrorsArn:
     Description: ARN of the Lambda errors alarm
     Value: !GetAtt AlarmLambdaErrors.Arn
+
+  AlarmReminderErrorsArn:
+    Description: ARN of the reminder function errors alarm
+    Value: !GetAtt AlarmReminderErrors.Arn
 
   AlarmLambdaThrottlesArn:
     Description: ARN of the Lambda throttles alarm
