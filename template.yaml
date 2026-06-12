@@ -10,6 +10,7 @@ Globals:
     Environment:
       Variables:
         DYNAMODB_TABLE: !Ref ChatbotTable
+        RATE_LIMITER_BACKEND: dynamo
         TELEGRAM_BOT_TOKEN: !Ref TelegramBotToken
         TELEGRAM_WEBHOOK_SECRET: !Ref TelegramWebhookSecret
         WHATSAPP_TOKEN: !Ref WhatsAppToken

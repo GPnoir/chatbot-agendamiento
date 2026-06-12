@@ -9,6 +9,9 @@ except ImportError:
 # --- Runtime ---
 IS_LAMBDA = bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
 DYNAMODB_TABLE = os.getenv("DYNAMODB_TABLE", "chatbot-agendamiento")
+RATE_LIMITER_BACKEND = os.getenv("RATE_LIMITER_BACKEND", "memory")
+RATE_LIMIT_MAX_MESSAGES = int(os.getenv("RATE_LIMIT_MAX_MESSAGES", "20"))
+RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "1569695377")  # Telegram ID del profesional
 MAX_CITAS_POR_CLIENTE = int(os.getenv("MAX_CITAS_POR_CLIENTE", "3"))
 
