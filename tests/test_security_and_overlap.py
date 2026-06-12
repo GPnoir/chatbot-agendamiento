@@ -355,7 +355,13 @@ class TestRateLimiter:
 
 class TestInputSanitization:
     def test_mensaje_largo_truncado(self, fresh_db):
-        """Mensajes de más de 500 chars se truncan sin error."""
+        """Chatbot-internal truncation resilience (defense in depth).
+
+        Passes a long string directly to chatbot.handle_message (bypassing
+        handler-level validation) to verify the chatbot layer does not crash.
+        Handler-level rejection behavior (sending the Spanish reply and returning
+        early) is covered by TestOversizedMessageRejection.
+        """
         texto_largo = "a" * 1000
         resp = chatbot.handle_message("test", TEST_USER, texto_largo)
         # No debe crashear, debe retornar bienvenida (texto no es comando válido)
@@ -598,3 +604,579 @@ class TestWhatsAppSignatureVerification:
             },
         )
         assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Input validation unit tests (issue #24)
+# ---------------------------------------------------------------------------
+
+class TestSanitizeText:
+    """Unit tests for input_validation.sanitize_text."""
+
+    def test_strips_leading_trailing_whitespace(self):
+        from input_validation import sanitize_text
+        assert sanitize_text("  hello  ") == "hello"
+
+    def test_removes_null_bytes(self):
+        from input_validation import sanitize_text
+        assert sanitize_text("hola\x00mundo") == "holamundo"
+
+    def test_removes_c0_control_chars_except_newline_tab(self):
+        from input_validation import sanitize_text
+        # \x01-\x08 and \x0b-\x1f should be stripped; \n and \t preserved
+        result = sanitize_text("a\x01b\x07c\x1fd")
+        assert result == "abcd"
+
+    def test_preserves_newline(self):
+        from input_validation import sanitize_text
+        result = sanitize_text("line1\nline2")
+        assert result == "line1\nline2"
+
+    def test_preserves_tab(self):
+        from input_validation import sanitize_text
+        result = sanitize_text("col1\tcol2")
+        assert result == "col1\tcol2"
+
+    def test_mixed_control_chars_with_preserved(self):
+        from input_validation import sanitize_text
+        # \x0b is vertical tab — should be removed; \n stays
+        result = sanitize_text("a\x0bb\nc")
+        assert result == "ab\nc"
+
+    def test_empty_string_stays_empty(self):
+        from input_validation import sanitize_text
+        assert sanitize_text("") == ""
+
+    def test_normal_text_unchanged(self):
+        from input_validation import sanitize_text
+        text = "Hola, quiero agendar una cita para el lunes."
+        assert sanitize_text(text) == text
+
+
+class TestValidateMessageText:
+    """Unit tests for input_validation.validate_message_text."""
+
+    def test_non_str_input_returns_none(self):
+        from input_validation import validate_message_text
+        assert validate_message_text(42) is None
+        assert validate_message_text(None) is None
+        assert validate_message_text(["text"]) is None
+
+    def test_exactly_500_chars_accepted(self):
+        from input_validation import validate_message_text
+        text = "a" * 500
+        result = validate_message_text(text)
+        assert result == text
+
+    def test_501_chars_returns_none(self):
+        from input_validation import validate_message_text
+        text = "a" * 501
+        assert validate_message_text(text) is None
+
+    def test_empty_after_sanitize_returns_none(self):
+        from input_validation import validate_message_text
+        # Only null bytes — empty after sanitize
+        assert validate_message_text("\x00\x01\x02") is None
+
+    def test_only_whitespace_returns_none(self):
+        from input_validation import validate_message_text
+        assert validate_message_text("   ") is None
+
+    def test_valid_short_text_returned_sanitized(self):
+        from input_validation import validate_message_text
+        result = validate_message_text("  hola\x00  ")
+        assert result == "hola"
+
+    def test_499_chars_accepted(self):
+        from input_validation import validate_message_text
+        text = "b" * 499
+        assert validate_message_text(text) == text
+
+    def test_length_checked_after_sanitize(self):
+        """A 501-char string that becomes <=500 after stripping leading spaces is accepted."""
+        from input_validation import validate_message_text
+        # 1 space + 500 'a' = 501 chars raw; after strip → 500 chars → accepted
+        text = " " + "a" * 500
+        result = validate_message_text(text)
+        assert result == "a" * 500
+
+
+class TestValidateTelegramPayload:
+    """Unit tests for input_validation.validate_telegram_payload."""
+
+    def test_valid_payload_returns_true(self):
+        from input_validation import validate_telegram_payload
+        payload = {
+            "message": {
+                "from": {"id": 12345},
+                "chat": {"id": 99},
+                "text": "hola",
+            }
+        }
+        assert validate_telegram_payload(payload) is True
+
+    def test_missing_message_key_returns_false(self):
+        from input_validation import validate_telegram_payload
+        assert validate_telegram_payload({"update_id": 1}) is False
+
+    def test_message_not_dict_returns_false(self):
+        from input_validation import validate_telegram_payload
+        assert validate_telegram_payload({"message": "not a dict"}) is False
+
+    def test_missing_from_id_returns_false(self):
+        from input_validation import validate_telegram_payload
+        payload = {"message": {"from": {}, "chat": {"id": 1}}}
+        assert validate_telegram_payload(payload) is False
+
+    def test_missing_chat_id_returns_false(self):
+        from input_validation import validate_telegram_payload
+        payload = {"message": {"from": {"id": 1}, "chat": {}}}
+        assert validate_telegram_payload(payload) is False
+
+    def test_non_dict_payload_returns_false(self):
+        from input_validation import validate_telegram_payload
+        assert validate_telegram_payload("not a dict") is False
+        assert validate_telegram_payload(None) is False
+
+    def test_text_as_int_returns_false(self):
+        from input_validation import validate_telegram_payload
+        payload = {
+            "message": {
+                "from": {"id": 1},
+                "chat": {"id": 1},
+                "text": 12345,  # must be str
+            }
+        }
+        assert validate_telegram_payload(payload) is False
+
+    def test_no_text_key_is_valid(self):
+        """Non-text updates (stickers, etc.) have no 'text'; handler skips them — return False."""
+        from input_validation import validate_telegram_payload
+        payload = {
+            "message": {
+                "from": {"id": 1},
+                "chat": {"id": 1},
+                # no 'text' key — e.g. photo or sticker
+            }
+        }
+        # No text → handler has nothing to process; False is correct (skip gracefully)
+        assert validate_telegram_payload(payload) is False
+
+
+class TestValidateWhatsAppPayload:
+    """Unit tests for input_validation.validate_whatsapp_payload."""
+
+    def _make_wa_payload(self, include_messages=True, text_body="hola"):
+        value = {}
+        if include_messages:
+            value["messages"] = [{"type": "text", "from": "123", "text": {"body": text_body}}]
+        else:
+            value["statuses"] = [{"id": "s1"}]
+        return {"entry": [{"changes": [{"value": value}]}]}
+
+    def test_valid_payload_with_messages_returns_true(self):
+        from input_validation import validate_whatsapp_payload
+        assert validate_whatsapp_payload(self._make_wa_payload()) is True
+
+    def test_status_only_payload_returns_false(self):
+        """Status-only payloads have no messages; handler skips → return False."""
+        from input_validation import validate_whatsapp_payload
+        assert validate_whatsapp_payload(self._make_wa_payload(include_messages=False)) is False
+
+    def test_non_dict_returns_false(self):
+        from input_validation import validate_whatsapp_payload
+        assert validate_whatsapp_payload("bad") is False
+        assert validate_whatsapp_payload(None) is False
+
+    def test_missing_entry_returns_false(self):
+        from input_validation import validate_whatsapp_payload
+        assert validate_whatsapp_payload({}) is False
+
+    def test_empty_entry_list_returns_false(self):
+        from input_validation import validate_whatsapp_payload
+        assert validate_whatsapp_payload({"entry": []}) is False
+
+
+# ---------------------------------------------------------------------------
+# Body size limit tests (issue #24)
+# ---------------------------------------------------------------------------
+
+def _make_oversized_body(size_bytes: int = 1_048_577) -> bytes:
+    """Return a raw bytes body that exceeds the default 1 MiB limit.
+
+    We use plain bytes (not JSON) so the size is exactly *size_bytes* and the
+    Content-Length header that httpx derives matches our expectation.
+    """
+    return b"x" * size_bytes
+
+
+def _make_size_limited_app():
+    """Return a minimal FastAPI app with only the body-size-limit middleware.
+
+    Using a dedicated app per test avoids the Starlette 'middleware_stack
+    already cached' problem that occurs when the real app is reused across
+    fixtures.  The middleware under test is the same class used in production.
+    """
+    from fastapi import FastAPI
+    from input_validation import _BodySizeLimitMiddleware
+
+    app = FastAPI()
+    app.add_middleware(_BodySizeLimitMiddleware, max_body_bytes=1_048_576)
+
+    @app.post("/probe")
+    async def _probe():
+        return {"ok": True}
+
+    return app
+
+
+class TestBodySizeLimit:
+    """Content-Length > 1 MiB must be rejected with 413 by the middleware."""
+
+    def test_middleware_rejects_oversized_body(self):
+        """_BodySizeLimitMiddleware must return 413 when Content-Length > 1 MiB."""
+        app = _make_size_limited_app()
+        oversized = _make_oversized_body()
+        with TestClient(app, raise_server_exceptions=True) as c:
+            resp = c.post("/probe", content=oversized)
+        assert resp.status_code == 413
+
+    def test_middleware_accepts_body_at_limit(self):
+        """_BodySizeLimitMiddleware must pass through a body just under 1 MiB."""
+        app = _make_size_limited_app()
+        body = b"x" * (1_048_576 - 1)
+        with TestClient(app, raise_server_exceptions=True) as c:
+            resp = c.post("/probe", content=body)
+        assert resp.status_code == 200
+
+    def test_middleware_accepts_body_exactly_at_limit(self):
+        """Body exactly at 1 MiB (not exceeding) must pass through."""
+        app = _make_size_limited_app()
+        body = b"x" * 1_048_576
+        with TestClient(app, raise_server_exceptions=True) as c:
+            resp = c.post("/probe", content=body)
+        assert resp.status_code == 200
+
+    def test_add_security_middleware_installs_body_limit(self):
+        """add_security_middleware must register _BodySizeLimitMiddleware on the app."""
+        from fastapi import FastAPI
+        from input_validation import add_security_middleware, _BodySizeLimitMiddleware
+        fresh = FastAPI()
+        add_security_middleware(fresh)
+        mw_classes = [m.cls for m in fresh.user_middleware]
+        assert _BodySizeLimitMiddleware in mw_classes
+
+
+# ---------------------------------------------------------------------------
+# CORS middleware tests (issue #24)
+# ---------------------------------------------------------------------------
+
+class TestCORSMiddleware:
+    """CORS middleware configuration tests."""
+
+    def test_add_security_middleware_registers_cors(self):
+        """add_security_middleware must register CORSMiddleware on a fresh app."""
+        from fastapi import FastAPI
+        from starlette.middleware.cors import CORSMiddleware
+        from input_validation import add_security_middleware
+        import importlib, config as cfg_mod, input_validation as iv_mod
+
+        fresh_app = FastAPI()
+        with patch.dict("os.environ", {"CORS_ORIGINS": "https://example.com"}):
+            # Reload config so CORS_ORIGINS is picked up
+            importlib.reload(cfg_mod)
+            importlib.reload(iv_mod)
+            try:
+                iv_mod.add_security_middleware(fresh_app)
+            finally:
+                # Restore both modules to pristine state so subsequent tests
+                # see the original CORS_ORIGINS value.
+                importlib.reload(cfg_mod)
+                importlib.reload(iv_mod)
+
+        middleware_classes = [m.cls for m in fresh_app.user_middleware]
+        assert CORSMiddleware in middleware_classes
+
+    def test_cors_allow_origin_header_present_for_configured_origin(self):
+        """Preflight request with a matching origin must get allow-origin in response."""
+        from fastapi import FastAPI
+        from starlette.middleware.cors import CORSMiddleware
+        from input_validation import _BodySizeLimitMiddleware
+
+        fresh_app = FastAPI()
+        # Manually wire known-good allow_origins so this test doesn't depend on env reload order
+        fresh_app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["https://example.com"],
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        fresh_app.add_middleware(_BodySizeLimitMiddleware, max_body_bytes=1_048_576)
+
+        @fresh_app.get("/health")
+        async def _health():
+            return {"status": "ok"}
+
+        with TestClient(fresh_app, raise_server_exceptions=True) as c:
+            resp = c.options(
+                "/health",
+                headers={
+                    "Origin": "https://example.com",
+                    "Access-Control-Request-Method": "GET",
+                },
+            )
+        assert "access-control-allow-origin" in resp.headers
+
+    def test_cors_no_allow_origin_when_empty_origins(self):
+        """With empty allow_origins, cross-origin requests must not get allow-origin header."""
+        from fastapi import FastAPI
+        from starlette.middleware.cors import CORSMiddleware
+        from input_validation import _BodySizeLimitMiddleware
+
+        fresh_app = FastAPI()
+        # Empty origins — default config
+        fresh_app.add_middleware(
+            CORSMiddleware,
+            allow_origins=[],
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        fresh_app.add_middleware(_BodySizeLimitMiddleware, max_body_bytes=1_048_576)
+
+        @fresh_app.get("/health")
+        async def _health():
+            return {"status": "ok"}
+
+        with TestClient(fresh_app, raise_server_exceptions=True) as c:
+            resp = c.get("/health", headers={"Origin": "https://evil.com"})
+        assert "access-control-allow-origin" not in resp.headers
+
+
+# ---------------------------------------------------------------------------
+# Webhook payload validation + oversized message (issue #24)
+# ---------------------------------------------------------------------------
+
+_TG_SECRET_HEADER = "test-tg-webhook-secret"
+
+
+@pytest.fixture()
+def lambda_client_for_validation():
+    """TestClient for lambda_handler.app with signature patched for WhatsApp tests."""
+    import lambda_handler
+    with patch("lambda_handler.WHATSAPP_APP_SECRET", _WA_SECRET):
+        with patch("lambda_handler.TELEGRAM_WEBHOOK_SECRET", _TG_SECRET_HEADER):
+            with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+                yield c
+
+
+@pytest.fixture()
+def server_client_for_validation():
+    """TestClient for server.app (Telegram webhook only)."""
+    import server as server_module
+    server_module.app.router.on_startup.clear()
+    server_module.app.router.on_shutdown.clear()
+    with patch("server.TELEGRAM_WEBHOOK_SECRET", _TG_SECRET_HEADER):
+        with TestClient(server_module.app, raise_server_exceptions=True) as c:
+            yield c
+
+
+def _make_tg_payload(text: str, user_id: int = 11111, chat_id: int = 22222) -> dict:
+    return {
+        "update_id": 1,
+        "message": {
+            "from": {"id": user_id, "first_name": "Test"},
+            "chat": {"id": chat_id},
+            "text": text,
+        },
+    }
+
+
+def _make_wa_msg_payload(text: str, from_number: str = "5491100000000") -> bytes:
+    payload = {
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "messages": [{
+                        "type": "text",
+                        "from": from_number,
+                        "text": {"body": text},
+                    }]
+                }
+            }]
+        }]
+    }
+    return json.dumps(payload).encode()
+
+
+class TestMalformedPayloadSkipped:
+    """Malformed Telegram/WhatsApp payloads must return 200 without processing."""
+
+    def test_malformed_telegram_lambda_returns_200(self, lambda_client_for_validation):
+        """Telegram payload missing 'message.from.id' must return 200, no processing."""
+        with patch("lambda_handler.chatbot.handle_message") as mock_handle:
+            resp = lambda_client_for_validation.post(
+                "/telegram/webhook",
+                json={"update_id": 1, "message": {"text": "hi", "chat": {"id": 1}}},
+                headers={"X-Telegram-Bot-Api-Secret-Token": _TG_SECRET_HEADER},
+            )
+        assert resp.status_code == 200
+        mock_handle.assert_not_called()
+
+    def test_empty_telegram_payload_lambda_returns_200(self, lambda_client_for_validation):
+        """Empty dict as Telegram payload must return 200, no processing."""
+        with patch("lambda_handler.chatbot.handle_message") as mock_handle:
+            resp = lambda_client_for_validation.post(
+                "/telegram/webhook",
+                json={},
+                headers={"X-Telegram-Bot-Api-Secret-Token": _TG_SECRET_HEADER},
+            )
+        assert resp.status_code == 200
+        mock_handle.assert_not_called()
+
+    def test_malformed_whatsapp_lambda_returns_200(self, lambda_client_for_validation):
+        """WhatsApp payload missing 'entry' must return 200, no processing."""
+        body = b"{}"
+        sig = _make_wa_signature(_WA_SECRET, body)
+        with patch("lambda_handler.chatbot.handle_message") as mock_handle:
+            with patch("lambda_handler._send_whatsapp", return_value=None):
+                resp = lambda_client_for_validation.post(
+                    "/whatsapp/webhook",
+                    content=body,
+                    headers={"Content-Type": "application/json", "X-Hub-Signature-256": sig},
+                )
+        assert resp.status_code == 200
+        mock_handle.assert_not_called()
+
+
+class TestOversizedMessageRejection:
+    """Message text over 500 chars must not reach chatbot; user gets a rejection reply."""
+
+    def test_oversized_tg_message_lambda_not_processed(self, lambda_client_for_validation):
+        """Telegram message >500 chars must NOT call chatbot.handle_message."""
+        long_text = "a" * 501
+        with patch("lambda_handler.chatbot.handle_message") as mock_handle:
+            with patch("lambda_handler._send_telegram") as mock_send:
+                resp = lambda_client_for_validation.post(
+                    "/telegram/webhook",
+                    json=_make_tg_payload(long_text),
+                    headers={"X-Telegram-Bot-Api-Secret-Token": _TG_SECRET_HEADER},
+                )
+        assert resp.status_code == 200
+        mock_handle.assert_not_called()
+
+    def test_oversized_tg_message_lambda_sends_rejection(self, lambda_client_for_validation):
+        """Telegram message >500 chars must send the Spanish rejection reply."""
+        long_text = "a" * 501
+        with patch("lambda_handler.chatbot.handle_message", return_value="should not be called"):
+            with patch("lambda_handler._send_telegram") as mock_send:
+                lambda_client_for_validation.post(
+                    "/telegram/webhook",
+                    json=_make_tg_payload(long_text),
+                    headers={"X-Telegram-Bot-Api-Secret-Token": _TG_SECRET_HEADER},
+                )
+        mock_send.assert_called_once()
+        _, kwargs = mock_send.call_args if mock_send.call_args.kwargs else (mock_send.call_args[0], {})
+        args = mock_send.call_args[0]
+        sent_text = args[1] if len(args) >= 2 else mock_send.call_args.kwargs.get("text", "")
+        assert "largo" in sent_text or "500" in sent_text
+
+    def test_oversized_wa_message_lambda_not_processed(self, lambda_client_for_validation):
+        """WhatsApp message >500 chars must NOT call chatbot.handle_message."""
+        long_text = "b" * 501
+        body = _make_wa_msg_payload(long_text)
+        sig = _make_wa_signature(_WA_SECRET, body)
+        with patch("lambda_handler.chatbot.handle_message") as mock_handle:
+            with patch("lambda_handler._send_whatsapp", return_value=None):
+                resp = lambda_client_for_validation.post(
+                    "/whatsapp/webhook",
+                    content=body,
+                    headers={"Content-Type": "application/json", "X-Hub-Signature-256": sig},
+                )
+        assert resp.status_code == 200
+        mock_handle.assert_not_called()
+
+    def test_oversized_wa_message_lambda_sends_rejection(self, lambda_client_for_validation):
+        """WhatsApp message >500 chars must send the Spanish rejection reply."""
+        long_text = "b" * 501
+        body = _make_wa_msg_payload(long_text)
+        sig = _make_wa_signature(_WA_SECRET, body)
+        with patch("lambda_handler.chatbot.handle_message", return_value="nope"):
+            with patch("lambda_handler._send_whatsapp") as mock_send:
+                lambda_client_for_validation.post(
+                    "/whatsapp/webhook",
+                    content=body,
+                    headers={"Content-Type": "application/json", "X-Hub-Signature-256": sig},
+                )
+        mock_send.assert_called_once()
+        args = mock_send.call_args[0]
+        sent_text = args[1] if len(args) >= 2 else mock_send.call_args.kwargs.get("text", "")
+        assert "largo" in sent_text or "500" in sent_text
+
+
+# ---------------------------------------------------------------------------
+# Production-app body size limit and CORS preflight tests (F2)
+# ---------------------------------------------------------------------------
+
+_OVERSIZED_BODY = b"x" * 1_048_577
+
+
+class TestProductionAppBodyLimit:
+    """Body > 1 MiB must be rejected with 413 by the real production app stacks."""
+
+    def test_lambda_handler_app_rejects_oversized_body(self):
+        """lambda_handler.app must return 413 for a 1_048_577-byte POST body."""
+        import lambda_handler
+        with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+            resp = c.post(
+                "/whatsapp/webhook",
+                content=_OVERSIZED_BODY,
+                headers={"Content-Type": "application/octet-stream"},
+            )
+        assert resp.status_code == 413
+
+    def test_server_app_rejects_oversized_body(self):
+        """server.app must return 413 for a 1_048_577-byte POST body."""
+        import server as server_module
+        server_module.app.router.on_startup.clear()
+        server_module.app.router.on_shutdown.clear()
+        with TestClient(server_module.app, raise_server_exceptions=True) as c:
+            resp = c.post(
+                "/whatsapp/webhook",
+                content=_OVERSIZED_BODY,
+                headers={"Content-Type": "application/octet-stream"},
+            )
+        assert resp.status_code == 413
+
+
+class TestProductionAppCORSPreflight:
+    """OPTIONS preflight from an unlisted origin must not echo allow-origin header."""
+
+    def test_lambda_handler_app_no_cors_for_evil_origin(self):
+        """lambda_handler.app must not return access-control-allow-origin for evil origin."""
+        import lambda_handler
+        with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+            resp = c.options(
+                "/whatsapp/webhook",
+                headers={
+                    "Origin": "https://evil.example",
+                    "Access-Control-Request-Method": "POST",
+                },
+            )
+        assert "access-control-allow-origin" not in resp.headers
+
+    def test_server_app_no_cors_for_evil_origin(self):
+        """server.app must not return access-control-allow-origin for evil origin."""
+        import server as server_module
+        server_module.app.router.on_startup.clear()
+        server_module.app.router.on_shutdown.clear()
+        with TestClient(server_module.app, raise_server_exceptions=True) as c:
+            resp = c.options(
+                "/whatsapp/webhook",
+                headers={
+                    "Origin": "https://evil.example",
+                    "Access-Control-Request-Method": "POST",
+                },
+            )
+        assert "access-control-allow-origin" not in resp.headers

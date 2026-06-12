@@ -16,10 +16,18 @@ from config import (
     WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN,
     WHATSAPP_APP_SECRET, TELEGRAM_WEBHOOK_SECRET, ADMIN_API_KEY,
 )
+from input_validation import (
+    add_security_middleware,
+    validate_telegram_payload,
+    validate_whatsapp_payload,
+    validate_message_text,
+    is_oversized,
+)
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Chatbot Agendamiento Lambda")
+add_security_middleware(app)
 
 META_API_URL = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
 
@@ -289,6 +297,13 @@ async def _send_whatsapp(to: str, text: str):
         await client.post(META_API_URL, json=payload, headers=headers)
 
 
+async def _send_telegram(chat_id: int, text: str):
+    from config import TELEGRAM_BOT_TOKEN
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await client.post(url, json={"chat_id": chat_id, "text": text})
+
+
 @app.get("/whatsapp/webhook")
 async def whatsapp_verify(request: Request):
     params = request.query_params
@@ -305,12 +320,22 @@ async def whatsapp_message(request: Request):
         return Response(status_code=403)
     try:
         data = json.loads(body)
+        if not validate_whatsapp_payload(data):
+            return {"status": "ok"}
         message = data["entry"][0]["changes"][0]["value"]["messages"][0]
         if message["type"] != "text":
             return {"status": "ok"}
         from_number = message["from"]
-        text = message["text"]["body"]
-        response = chatbot.handle_message("whatsapp", from_number, text)
+        raw_text = message["text"]["body"]
+        clean = validate_message_text(raw_text)
+        if clean is None:
+            if is_oversized(raw_text):
+                await _send_whatsapp(
+                    from_number,
+                    "Tu mensaje es demasiado largo (máximo 500 caracteres).",
+                )
+            return {"status": "ok"}
+        response = chatbot.handle_message("whatsapp", from_number, clean)
         await _send_whatsapp(from_number, response)
     except (KeyError, IndexError, ValueError):
         pass
@@ -327,24 +352,26 @@ async def telegram_webhook(request: Request):
         logger.info(f"Telegram: secret mismatch, got='{secret[:10]}...'")
         return JSONResponse(status_code=403, content={"error": "forbidden"})
     data = await request.json()
+    if not validate_telegram_payload(data):
+        logger.info("Telegram: payload failed structural validation, skipping")
+        return {"status": "ok"}
+    msg = data["message"]
+    raw_text = msg.get("text", "")
+    user_id = str(msg["from"]["id"])
+    chat_id = msg["chat"]["id"]
+    clean = validate_message_text(raw_text)
+    if clean is None:
+        if is_oversized(raw_text):
+            logger.info("Telegram: message too long, sending rejection")
+            await _send_telegram(
+                chat_id,
+                "Tu mensaje es demasiado largo (máximo 500 caracteres).",
+            )
+        return {"status": "ok"}
     try:
-        msg = data.get("message", {})
-        if not msg:
-            logger.info("Telegram: no message in update")
-            return {"status": "ok"}
-        text = msg.get("text", "")
-        user_id = str(msg["from"]["id"])
-        chat_id = msg["chat"]["id"]
-        logger.info(f"Telegram: user={user_id} text='{text}' chat={chat_id}")
-        if not text:
-            return {"status": "ok"}
-        response = chatbot.handle_message("telegram", user_id, text)
+        response = chatbot.handle_message("telegram", user_id, clean)
         logger.info(f"Telegram: response='{response[:80]}...'")
-        from config import TELEGRAM_BOT_TOKEN
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(url, json={"chat_id": chat_id, "text": response})
-            logger.info(f"Telegram: sendMessage status={r.status_code}")
+        await _send_telegram(chat_id, response)
     except (KeyError, TypeError) as e:
         logger.error(f"Telegram: error {e}")
     return {"status": "ok"}
