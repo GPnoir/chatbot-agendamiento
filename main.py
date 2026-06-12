@@ -6,6 +6,9 @@ import uvicorn
 
 import database as db
 from config import HOST, PORT
+from observability import get_logger
+
+logger = get_logger(__name__)
 
 
 async def run_polling():
@@ -15,7 +18,7 @@ async def run_polling():
     from fastapi import FastAPI
 
     db.init_db()
-    print("✅ Base de datos inicializada")
+    logger.info("database initialized")
 
     # FastAPI para WhatsApp
     app = FastAPI()
@@ -29,10 +32,10 @@ async def run_polling():
     config = uvicorn.Config(app, host=HOST, port=PORT, log_level="info")
     server = uvicorn.Server(config)
     server_task = asyncio.create_task(server.serve())
-    print(f"🌐 Servidor WhatsApp en http://{HOST}:{PORT}")
+    logger.info("WhatsApp server started", extra={"host": HOST, "port": PORT})
 
     # Telegram polling
-    print("🤖 Telegram bot iniciado (polling)")
+    logger.info("Telegram bot started (polling mode)")
     telegram_app = create_telegram_app()
     async with telegram_app:
         await telegram_app.start()
@@ -52,7 +55,7 @@ async def run_polling():
 def run_webhook():
     """Modo producción: ambos canales via webhook."""
     db.init_db()
-    print(f"🚀 Servidor webhook en http://{HOST}:{PORT}")
+    logger.info("webhook server starting", extra={"host": HOST, "port": PORT})
     uvicorn.run("server:app", host=HOST, port=PORT, reload=False)
 
 
@@ -66,6 +69,6 @@ if __name__ == "__main__":
         try:
             asyncio.run(run_polling())
         except KeyboardInterrupt:
-            print("\n👋 Bot detenido.")
+            logger.info("bot stopped by user")
     else:
         run_webhook()

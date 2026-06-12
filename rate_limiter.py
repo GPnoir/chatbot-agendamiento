@@ -25,20 +25,14 @@ temporarily ineffective during such an outage.
 Clears the in-memory state only.  It is a test helper and has no effect on
 the DynamoDB backend; DynamoDB items expire via TTL.
 """
-import hashlib
-import logging
 import os
 import time
 from collections import defaultdict
 
 from config import RATE_LIMIT_MAX_MESSAGES, RATE_LIMIT_WINDOW_SECONDS
+from observability import get_logger, hash_user_id as _hash_user_id
 
-logger = logging.getLogger(__name__)
-
-
-def _hash_user_id(user_id: str) -> str:
-    """Short non-reversible identifier for logs; raw user ids are PII."""
-    return hashlib.sha256(user_id.encode()).hexdigest()[:8]
+logger = get_logger(__name__)
 
 # Module-level aliases kept for backward compatibility with tests that
 # reference ``rate_limiter.MAX_MESSAGES`` or ``rate_limiter.WINDOW_SECONDS``.

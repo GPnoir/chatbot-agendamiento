@@ -2,8 +2,8 @@
 import json
 import hashlib
 import hmac
-import logging
 import os
+import time
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -23,8 +23,9 @@ from input_validation import (
     validate_message_text,
     is_oversized,
 )
+from observability import get_logger, log_message_handled
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 app = FastAPI(title="Chatbot Agendamiento Lambda")
 add_security_middleware(app)
@@ -336,7 +337,16 @@ async def whatsapp_message(request: Request):
                     "Tu mensaje es demasiado largo (máximo 500 caracteres).",
                 )
             return {"status": "ok"}
+        t0 = time.monotonic()
         response = chatbot.handle_message("whatsapp", from_number, clean)
+        duration_ms = (time.monotonic() - t0) * 1000
+        log_message_handled(
+            logger,
+            channel="whatsapp",
+            user_id=from_number,
+            action="message_handled",
+            duration_ms=duration_ms,
+        )
         await _send_whatsapp(from_number, response)
     except (KeyError, IndexError, ValueError):
         pass
@@ -346,16 +356,14 @@ async def whatsapp_message(request: Request):
 # ── Telegram ──────────────────────────────────────────────────────────
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
-    import logging
-    logger = logging.getLogger()
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
     # Empty configured secret fails closed: reject everything
     if not TELEGRAM_WEBHOOK_SECRET or secret != TELEGRAM_WEBHOOK_SECRET:
-        logger.info(f"Telegram: secret mismatch, got='{secret[:10]}...'")
+        logger.warning("telegram webhook rejected: secret mismatch")
         return JSONResponse(status_code=403, content={"error": "forbidden"})
     data = await request.json()
     if not validate_telegram_payload(data):
-        logger.info("Telegram: payload failed structural validation, skipping")
+        logger.debug("telegram webhook: payload failed structural validation, skipping")
         return {"status": "ok"}
     msg = data["message"]
     raw_text = msg.get("text", "")
@@ -364,18 +372,25 @@ async def telegram_webhook(request: Request):
     clean = validate_message_text(raw_text)
     if clean is None:
         if is_oversized(raw_text):
-            logger.info("Telegram: message too long, sending rejection")
             await _send_telegram(
                 chat_id,
                 "Tu mensaje es demasiado largo (máximo 500 caracteres).",
             )
         return {"status": "ok"}
     try:
+        t0 = time.monotonic()
         response = chatbot.handle_message("telegram", user_id, clean)
-        logger.info(f"Telegram: response='{response[:80]}...'")
+        duration_ms = (time.monotonic() - t0) * 1000
+        log_message_handled(
+            logger,
+            channel="telegram",
+            user_id=user_id,
+            action="message_handled",
+            duration_ms=duration_ms,
+        )
         await _send_telegram(chat_id, response)
     except (KeyError, TypeError) as e:
-        logger.error(f"Telegram: error {e}")
+        logger.error("telegram webhook: message handling error", extra={"error": str(e)})
     return {"status": "ok"}
 
 
@@ -385,11 +400,10 @@ _mangum = Mangum(app, lifespan="off")
 
 def handler(event, context):
     """Lambda entry point - maneja tanto API Gateway como EventBridge warm-up."""
-    import logging
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    logger.info(f"Event keys: {list(event.keys())}")
-    # EventBridge warm-up o evento no-HTTP
+    if context is not None and hasattr(context, "aws_request_id"):
+        logger.append_keys(request_id=context.aws_request_id)
+    # EventBridge warm-up o evento no-HTTP — respond quickly without INFO logging
     if "httpMethod" not in event and "requestContext" not in event:
+        logger.debug("lambda warm-up event received")
         return {"statusCode": 200, "body": "warm"}
     return _mangum(event, context)
