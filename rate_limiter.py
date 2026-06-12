@@ -25,7 +25,6 @@ temporarily ineffective during such an outage.
 Clears the in-memory state only.  It is a test helper and has no effect on
 the DynamoDB backend; DynamoDB items expire via TTL.
 """
-import logging
 import os
 import time
 from collections import defaultdict

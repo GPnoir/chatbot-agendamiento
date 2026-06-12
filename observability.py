@@ -8,12 +8,8 @@ Thin wrapper around aws_lambda_powertools Logger that provides:
 from __future__ import annotations
 
 import hashlib
-from typing import TYPE_CHECKING
 
 from aws_lambda_powertools import Logger
-
-if TYPE_CHECKING:
-    pass
 
 _SERVICE_NAME = "chatbot-agendamiento"
 

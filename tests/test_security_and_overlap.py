@@ -1505,6 +1505,10 @@ class TestTelegramWebhookPIIFree:
         entry = handled[0]
         assert entry.get("channel") == "telegram"
         assert entry.get("duration_ms") is not None and entry["duration_ms"] >= 0
+        # User must be the 8-char hash, never the raw id from the payload
+        from observability import hash_user_id
+        assert entry.get("user") == hash_user_id("11111")
+        assert entry["user"] != "11111" and len(entry["user"]) == 8
 
 
 class TestWarmUpNotLoggedAtInfo:
