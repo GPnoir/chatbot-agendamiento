@@ -45,6 +45,16 @@ Parameters:
     Type: String
     NoEcho: true
     Default: ''
+  AlarmEmail:
+    Type: String
+    Default: ''
+    Description: >
+      Optional email address for alarm notifications. When empty, alarms are
+      created but no notifications are sent (still visible in CloudWatch console
+      and dashboards).
+
+Conditions:
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
 
 Resources:
   # ── DynamoDB ──────────────────────────────────────────────────────
@@ -159,6 +169,154 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt WarmUpRule.Arn
 
+  # ── Alarm Notifications (optional) ───────────────────────────────
+  # AlarmTopic is only created when AlarmEmail is provided.
+  # Alarms always exist; actions are conditionally wired to the topic.
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlarmEmail
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-alarm-notifications'
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlarmEmail
+
+  # ── CloudWatch Alarms ─────────────────────────────────────────────
+
+  # Lambda: unhandled errors (any Error count >= 1 in a 5-minute window).
+  AlarmLambdaErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-lambda-errors'
+      AlarmDescription: Lambda ChatbotFunction raised at least one error in the last 5 minutes.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ChatbotFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+
+  # Lambda: throttles indicate concurrency pressure or burst-limit hits.
+  AlarmLambdaThrottles:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-lambda-throttles'
+      AlarmDescription: Lambda ChatbotFunction was throttled at least once in the last 5 minutes.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ChatbotFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+
+  # DynamoDB: read throttle events.
+  # NOTE: PAY_PER_REQUEST (on-demand) tables do not reliably publish
+  # ThrottledRequests. AWS recommends ReadThrottleEvents and
+  # WriteThrottleEvents as separate alarms for on-demand tables.
+  AlarmDynamoDBReadThrottles:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-dynamodb-read-throttles'
+      AlarmDescription: DynamoDB ChatbotTable had at least one read throttle event in the last 5 minutes.
+      Namespace: AWS/DynamoDB
+      MetricName: ReadThrottleEvents
+      Dimensions:
+        - Name: TableName
+          Value: !Ref ChatbotTable
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+
+  # DynamoDB: write throttle events (companion to the read alarm above).
+  AlarmDynamoDBWriteThrottles:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-dynamodb-write-throttles'
+      AlarmDescription: DynamoDB ChatbotTable had at least one write throttle event in the last 5 minutes.
+      Namespace: AWS/DynamoDB
+      MetricName: WriteThrottleEvents
+      Dimensions:
+        - Name: TableName
+          Value: !Ref ChatbotTable
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+
+  # API Gateway 5XX: server-side errors warrant immediate attention.
+  # The ApiName dimension for SAM's implicit ServerlessRestApi is the
+  # CloudFormation stack name. SAM generates the implicit REST API with
+  # the logical name ServerlessRestApi and sets its Name property to the
+  # stack name, so the ApiName dimension value equals AWS::StackName.
+  AlarmApiGateway5XX:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-apigw-5xx'
+      AlarmDescription: API Gateway returned at least one 5XX error in the last 5 minutes.
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub '${AWS::StackName}'
+        - Name: Stage
+          Value: Prod
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+
+  # API Gateway 4XX: threshold set to 10 rather than 1 because a handful
+  # of 4xx responses per window is normal (bots, invalid paths, health
+  # probes). Alerting at >= 10 catches scanners or misconfigured clients
+  # without generating false-positive noise from routine traffic.
+  AlarmApiGateway4XX:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-apigw-4xx'
+      AlarmDescription: API Gateway returned 10 or more 4XX errors in the last 5 minutes (possible scanner or misconfigured client).
+      Namespace: AWS/ApiGateway
+      MetricName: 4XXError
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub '${AWS::StackName}'
+        - Name: Stage
+          Value: Prod
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+
 Outputs:
   ApiUrl:
     Description: URL base del API Gateway
@@ -169,3 +327,33 @@ Outputs:
   TelegramWebhookUrl:
     Description: URL para configurar en Telegram
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/telegram/webhook"
+
+  # ── Alarm Outputs ─────────────────────────────────────────────────
+  AlarmTopicArn:
+    Condition: HasAlarmEmail
+    Description: SNS topic ARN used for alarm notifications
+    Value: !Ref AlarmTopic
+
+  AlarmLambdaErrorsArn:
+    Description: ARN of the Lambda errors alarm
+    Value: !GetAtt AlarmLambdaErrors.Arn
+
+  AlarmLambdaThrottlesArn:
+    Description: ARN of the Lambda throttles alarm
+    Value: !GetAtt AlarmLambdaThrottles.Arn
+
+  AlarmDynamoDBReadThrottlesArn:
+    Description: ARN of the DynamoDB read throttles alarm
+    Value: !GetAtt AlarmDynamoDBReadThrottles.Arn
+
+  AlarmDynamoDBWriteThrottlesArn:
+    Description: ARN of the DynamoDB write throttles alarm
+    Value: !GetAtt AlarmDynamoDBWriteThrottles.Arn
+
+  AlarmApiGateway5XXArn:
+    Description: ARN of the API Gateway 5XX error alarm
+    Value: !GetAtt AlarmApiGateway5XX.Arn
+
+  AlarmApiGateway4XXArn:
+    Description: ARN of the API Gateway 4XX error alarm
+    Value: !GetAtt AlarmApiGateway4XX.Arn
