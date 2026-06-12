@@ -63,7 +63,14 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: us-east-1
+          ALARM_EMAIL: ${{ secrets.ALARM_EMAIL }}
         run: |
+          # sam rejects empty parameter-overrides values ("Key=" is invalid),
+          # so optional parameters are only included when the secret is set
+          EXTRA_PARAMS=()
+          if [ -n "$ALARM_EMAIL" ]; then
+            EXTRA_PARAMS+=("AlarmEmail=$ALARM_EMAIL")
+          fi
           sam deploy \
             --stack-name chatbot-agendamiento \
             --region us-east-1 \
@@ -78,7 +85,8 @@ jobs:
               "WhatsAppPhoneNumberId=${{ secrets.WHATSAPP_PHONE_NUMBER_ID }}" \
               "WhatsAppVerifyToken=${{ secrets.WHATSAPP_VERIFY_TOKEN }}" \
               "WhatsAppAppSecret=${{ secrets.WHATSAPP_APP_SECRET }}" \
-              "AdminApiKey=${{ secrets.ADMIN_API_KEY }}"
+              "AdminApiKey=${{ secrets.ADMIN_API_KEY }}" \
+              "${EXTRA_PARAMS[@]}"
 
       - name: Configure Telegram Webhook
         env:
