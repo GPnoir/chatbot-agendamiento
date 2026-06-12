@@ -1,7 +1,7 @@
 """Adaptador para WhatsApp via Meta Cloud API."""
 import hashlib
 import hmac
-import logging
+import time
 
 import httpx
 from fastapi import APIRouter, Request, Response
@@ -9,8 +9,9 @@ from fastapi import APIRouter, Request, Response
 import chatbot
 from config import WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET
 from input_validation import validate_whatsapp_payload, validate_message_text, is_oversized
+from observability import get_logger, log_message_handled
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/whatsapp")
 META_API_URL = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
@@ -87,7 +88,16 @@ async def receive_message(request: Request):
                     "Tu mensaje es demasiado largo (máximo 500 caracteres).",
                 )
             return {"status": "ok"}
+        t0 = time.monotonic()
         response = chatbot.handle_message("whatsapp", from_number, clean)
+        duration_ms = (time.monotonic() - t0) * 1000
+        log_message_handled(
+            logger,
+            channel="whatsapp",
+            user_id=from_number,
+            action="message_handled",
+            duration_ms=duration_ms,
+        )
         await send_message(from_number, response)
     except (KeyError, IndexError, ValueError):
         pass

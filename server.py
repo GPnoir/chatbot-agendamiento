@@ -1,4 +1,6 @@
 """Servidor FastAPI - webhooks para Telegram y WhatsApp."""
+import time
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from telegram import Update
@@ -8,6 +10,9 @@ from channels.whatsapp_bot import router as whatsapp_router
 from channels.telegram_bot import create_telegram_app
 from config import WEBHOOK_URL, TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET
 from input_validation import add_security_middleware, validate_telegram_payload, validate_message_text, is_oversized
+from observability import get_logger, log_message_handled
+
+logger = get_logger(__name__)
 
 app = FastAPI(title="Chatbot Agendamiento")
 add_security_middleware(app)
@@ -65,10 +70,20 @@ async def telegram_webhook(request: Request):
         return {"status": "ok"}
     # Build a sanitized copy so python-telegram-bot processes clean text
     import copy
+    user_id = str(msg["from"]["id"])
     clean_data = copy.deepcopy(data)
     clean_data["message"]["text"] = clean
     update = Update.de_json(clean_data, telegram_app.bot)
+    t0 = time.monotonic()
     await telegram_app.process_update(update)
+    duration_ms = (time.monotonic() - t0) * 1000
+    log_message_handled(
+        logger,
+        channel="telegram",
+        user_id=user_id,
+        action="message_handled",
+        duration_ms=duration_ms,
+    )
     return {"status": "ok"}
 
 

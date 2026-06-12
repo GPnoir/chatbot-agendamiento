@@ -1238,3 +1238,292 @@ class TestEmptySecretFailClosed:
                     },
                 )
         assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Structured logging / observability tests (issue #19)
+# ---------------------------------------------------------------------------
+import io
+import sys
+
+
+def _parse_json_logs(text: str) -> list:
+    """Parse newline-delimited JSON log output into a list of dicts."""
+    import json
+    records = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return records
+
+
+class TestHashUserId:
+    """hash_user_id must be deterministic SHA-256[:8] and never return the raw id."""
+
+    def test_returns_8_char_hex(self):
+        from observability import hash_user_id
+        result = hash_user_id("12345678")
+        assert len(result) == 8
+        assert all(c in "0123456789abcdef" for c in result)
+
+    def test_deterministic(self):
+        from observability import hash_user_id
+        assert hash_user_id("user_abc") == hash_user_id("user_abc")
+
+    def test_different_users_differ(self):
+        from observability import hash_user_id
+        assert hash_user_id("user_a") != hash_user_id("user_b")
+
+    def test_hash_not_equal_to_raw_id(self):
+        """The hashed value must differ from the raw user id for any realistic id."""
+        from observability import hash_user_id
+        user_id = "9876543210"
+        assert hash_user_id(user_id) != user_id
+
+    def test_rate_limiter_uses_same_hash(self):
+        """rate_limiter.hash_user_id must produce the same value as observability.hash_user_id."""
+        from observability import hash_user_id
+        import rate_limiter
+        uid = "tg_user_999"
+        assert rate_limiter._hash_user_id(uid) == hash_user_id(uid)
+
+
+class TestLogMessageHandled:
+    """log_message_handled must emit a structured entry without leaking PII."""
+
+    def test_emits_at_least_one_record(self, capsys):
+        from observability import get_logger, log_message_handled
+        logger = get_logger("test-emit")
+        log_message_handled(logger, channel="telegram", user_id="12345678",
+                            action="message_handled", duration_ms=42.0)
+        out = capsys.readouterr().out
+        records = _parse_json_logs(out)
+        assert len(records) >= 1
+
+    def test_contains_channel(self, capsys):
+        from observability import get_logger, log_message_handled
+        logger = get_logger("test-chan")
+        log_message_handled(logger, channel="telegram", user_id="12345678",
+                            action="message_handled", duration_ms=1.0)
+        out = capsys.readouterr().out
+        records = _parse_json_logs(out)
+        assert any(r.get("channel") == "telegram" for r in records)
+
+    def test_contains_action(self, capsys):
+        from observability import get_logger, log_message_handled
+        logger = get_logger("test-action")
+        log_message_handled(logger, channel="telegram", user_id="u1",
+                            action="message_handled", duration_ms=1.0)
+        out = capsys.readouterr().out
+        records = _parse_json_logs(out)
+        assert any(r.get("action") == "message_handled" for r in records)
+
+    def test_duration_ms_non_negative(self, capsys):
+        from observability import get_logger, log_message_handled
+        logger = get_logger("test-dur")
+        log_message_handled(logger, channel="telegram", user_id="u2",
+                            action="message_handled", duration_ms=99.5)
+        out = capsys.readouterr().out
+        records = _parse_json_logs(out)
+        matched = [r for r in records if "duration_ms" in r]
+        assert matched, "duration_ms key must be present"
+        assert matched[0]["duration_ms"] >= 0
+
+    def test_user_id_is_hashed_not_raw(self, capsys):
+        """The raw user id must NOT appear in the log output; hashed form must appear."""
+        from observability import get_logger, log_message_handled, hash_user_id
+        raw = "9876543210"
+        hashed = hash_user_id(raw)
+        logger = get_logger("test-pii")
+        log_message_handled(logger, channel="telegram", user_id=raw,
+                            action="message_handled", duration_ms=1.0)
+        out = capsys.readouterr().out
+        assert raw not in out, "Raw user id must not appear in log"
+        assert hashed in out, "Hashed user id must appear in log"
+
+    def test_request_id_included_when_provided(self, capsys):
+        from observability import get_logger, log_message_handled
+        logger = get_logger("test-reqid")
+        log_message_handled(logger, channel="telegram", user_id="u3",
+                            action="message_handled", duration_ms=1.0,
+                            request_id="req-abc-123")
+        out = capsys.readouterr().out
+        records = _parse_json_logs(out)
+        assert any(r.get("request_id") == "req-abc-123" for r in records)
+
+    def test_request_id_absent_when_not_provided(self, capsys):
+        from observability import get_logger, log_message_handled
+        logger = get_logger("test-no-reqid")
+        log_message_handled(logger, channel="telegram", user_id="u4",
+                            action="message_handled", duration_ms=1.0)
+        out = capsys.readouterr().out
+        records = _parse_json_logs(out)
+        for r in records:
+            assert "request_id" not in r
+
+
+def _collect_log_records(fn, *args, **kwargs):
+    """Intercept powertools Logger output by patching the internal stdlib handler.
+
+    aws_lambda_powertools.Logger is NOT a subclass of logging.Logger — it wraps
+    one internally as ``_logger``. Powertools grabs the real stdout stream at
+    instantiation time, so capfd/capsys do not reliably intercept its output
+    inside pytest's full suite run. Instead we:
+
+    1. Find every stdlib logging.Logger whose name contains "chatbot-agendamiento"
+       (these are the internal loggers backing our powertools instances).
+    2. Replace their handlers with a StringIO-backed handler (preserving the
+       existing formatter so JSON output is still produced).
+    3. Run fn(), collect and parse the lines, then restore original handlers.
+
+    Returns a list of dicts parsed from JSON log lines.
+    """
+    import json
+    import logging
+    import io
+
+    buf = io.StringIO()
+
+    # Gather all relevant stdlib loggers (backing powertools instances).
+    target_loggers = [
+        v for k, v in logging.Logger.manager.loggerDict.items()
+        if "chatbot-agendamiento" in k and isinstance(v, logging.Logger)
+    ]
+
+    original_handlers = {}
+    for stdlib_logger in target_loggers:
+        original_handlers[stdlib_logger] = list(stdlib_logger.handlers)
+        existing_formatter = (
+            stdlib_logger.handlers[0].formatter if stdlib_logger.handlers else None
+        )
+        buf_handler = logging.StreamHandler(buf)
+        buf_handler.setLevel(logging.DEBUG)
+        if existing_formatter is not None:
+            buf_handler.setFormatter(existing_formatter)
+        stdlib_logger.handlers = [buf_handler]
+
+    try:
+        fn(*args, **kwargs)
+    finally:
+        for stdlib_logger, handlers in original_handlers.items():
+            stdlib_logger.handlers = handlers
+
+    records = []
+    for line in buf.getvalue().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return records
+
+
+class TestTelegramWebhookPIIFree:
+    """Telegram webhook must not log message text, raw user ids, or secrets.
+
+    PII-absence tests use capfd because they only assert on absence (any output
+    captured by any mechanism is fine to check). The positive-emission test uses
+    _collect_log_records() to patch the logger's stream handler directly,
+    bypassing pytest's stdout capture interplay.
+    """
+
+    @pytest.fixture()
+    def tg_client(self):
+        import lambda_handler
+        with patch("lambda_handler.TELEGRAM_WEBHOOK_SECRET", _TG_SECRET_HEADER):
+            with patch("lambda_handler.chatbot.handle_message", return_value="ok"):
+                with patch("lambda_handler._send_telegram"):
+                    with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+                        yield c
+
+    def _post_telegram(self, client, text="hello secret_payload", user_id=55555, chat_id=66666):
+        return client.post(
+            "/telegram/webhook",
+            json=_make_tg_payload(text, user_id=user_id, chat_id=chat_id),
+            headers={"X-Telegram-Bot-Api-Secret-Token": _TG_SECRET_HEADER},
+        )
+
+    def test_message_text_not_in_logs(self, tg_client, capfd):
+        secret_text = "this_is_secret_message_content_xyz"
+        self._post_telegram(tg_client, text=secret_text)
+        captured = capfd.readouterr()
+        assert secret_text not in captured.out
+        assert secret_text not in captured.err
+
+    def test_raw_user_id_not_in_logs(self, tg_client, capfd):
+        raw_user_id = 99887766
+        self._post_telegram(tg_client, user_id=raw_user_id)
+        captured = capfd.readouterr()
+        assert str(raw_user_id) not in captured.out
+        assert str(raw_user_id) not in captured.err
+
+    def test_secret_not_in_rejection_logs(self, capfd):
+        """A wrong secret must not appear in any log output."""
+        import lambda_handler
+        with patch("lambda_handler.TELEGRAM_WEBHOOK_SECRET", "real-secret-value-do-not-log"):
+            with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+                c.post(
+                    "/telegram/webhook",
+                    json={},
+                    headers={"X-Telegram-Bot-Api-Secret-Token": "presented-secret-123"},
+                )
+        captured = capfd.readouterr()
+        assert "presented-secret-123" not in captured.out
+        assert "presented-secret-123" not in captured.err
+        assert "real-secret-value-do-not-log" not in captured.out
+        assert "real-secret-value-do-not-log" not in captured.err
+
+    def test_handled_message_emits_structured_entry(self):
+        """A successful Telegram message must emit a message_handled structured entry.
+
+        Uses _collect_log_records() to patch the logger handler directly, which
+        is the only reliable approach when powertools has already captured stdout
+        at module load time and pytest's fd-level capture cannot intercept it
+        consistently across the full test suite run.
+        """
+        import lambda_handler
+
+        def _do_request():
+            with patch("lambda_handler.TELEGRAM_WEBHOOK_SECRET", _TG_SECRET_HEADER):
+                with patch("lambda_handler.chatbot.handle_message", return_value="ok"):
+                    with patch("lambda_handler._send_telegram"):
+                        with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+                            c.post(
+                                "/telegram/webhook",
+                                json=_make_tg_payload("hello"),
+                                headers={"X-Telegram-Bot-Api-Secret-Token": _TG_SECRET_HEADER},
+                            )
+
+        records = _collect_log_records(_do_request)
+        handled = [r for r in records if r.get("event") == "message_handled"]
+        assert handled, "Expected a message_handled structured log entry"
+        entry = handled[0]
+        assert entry.get("channel") == "telegram"
+        assert entry.get("duration_ms") is not None and entry["duration_ms"] >= 0
+
+
+class TestWarmUpNotLoggedAtInfo:
+    """Lambda warm-up event must not produce INFO log entries.
+
+    Uses _collect_log_records() to patch logger handlers directly, bypassing
+    the powertools/pytest stdout capture interaction.
+    """
+
+    def test_warmup_no_info_log(self):
+        """handler() with a warm-up event (no httpMethod) must not log at INFO level."""
+        import lambda_handler
+
+        warmup_event = {"source": "serverless-plugin-warmup"}
+        mock_context = type("Ctx", (), {"aws_request_id": "test-req-id"})()
+
+        def _do_warmup():
+            lambda_handler.handler(warmup_event, mock_context)
+
+        records = _collect_log_records(_do_warmup)
+        info_records = [r for r in records if r.get("level", "").upper() == "INFO"]
+        assert not info_records, f"Expected no INFO logs for warm-up, got: {info_records}"
