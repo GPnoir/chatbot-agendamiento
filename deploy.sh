@@ -48,8 +48,22 @@ DEPLOY_ARGS=(
         "WhatsAppToken=${WHATSAPP_TOKEN}"
         "WhatsAppPhoneNumberId=${WHATSAPP_PHONE_NUMBER_ID}"
         "WhatsAppVerifyToken=${WHATSAPP_VERIFY_TOKEN}"
-        "WhatsAppAppSecret=${WHATSAPP_APP_SECRET:-}"
 )
+
+# Optional parameters: sam rejects empty "Key=" overrides. Omitted parameters
+# keep their current stack values (UsePreviousValue), so they are only passed
+# when the corresponding env var is set.
+if [ -z "${ADMIN_API_KEY:-}" ]; then
+    echo "ℹ️  ADMIN_API_KEY no definida: se mantiene el valor actual del stack"
+else
+    DEPLOY_ARGS+=("AdminApiKey=${ADMIN_API_KEY}")
+fi
+if [ -n "${WHATSAPP_APP_SECRET:-}" ]; then
+    DEPLOY_ARGS+=("WhatsAppAppSecret=${WHATSAPP_APP_SECRET}")
+fi
+if [ -n "${ALARM_EMAIL:-}" ]; then
+    DEPLOY_ARGS+=("AlarmEmail=${ALARM_EMAIL}")
+fi
 
 sam deploy "${DEPLOY_ARGS[@]}"
 
