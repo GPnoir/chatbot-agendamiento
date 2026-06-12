@@ -161,16 +161,21 @@ class TestCitas:
         assert len(citas) == 0
 
     def test_modificar_cita(self, fresh_db):
+        from datetime import timedelta
         cliente = fresh_db.get_or_create_cliente("test", TEST_USER)
         servicios = fresh_db.get_servicios()
         profesionales = fresh_db.get_profesionales()
+        # Dynamic future dates: get_citas_cliente filters fecha >= today,
+        # so hardcoded dates would rot and empty the result list over time
+        fecha_original = (date.today() + timedelta(days=7)).isoformat()
+        fecha_nueva = (date.today() + timedelta(days=8)).isoformat()
         cita = fresh_db.crear_cita(
             cliente["id"], servicios[0]["id"], profesionales[0]["id"],
-            "2026-06-10", "10:00"
+            fecha_original, "10:00"
         )
-        fresh_db.modificar_cita(cita["id"], "2026-06-11", "11:00")
+        fresh_db.modificar_cita(cita["id"], fecha_nueva, "11:00")
         citas = fresh_db.get_citas_cliente(cliente["id"])
-        assert citas[0]["fecha"] == "2026-06-11"
+        assert citas[0]["fecha"] == fecha_nueva
         assert citas[0]["hora"] == "11:00"
 
     def test_get_citas_solo_futuras(self, fresh_db):
