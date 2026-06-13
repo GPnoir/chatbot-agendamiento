@@ -233,6 +233,54 @@ def modificar_cita(cita_pk: str, cita_sk: str, nueva_fecha: str, nueva_hora: str
     crear_cita(cita["cliente_id"], cita["servicio_id"], cita["profesional_id"], nueva_fecha, nueva_hora)
 
 
+def get_citas_rango(desde: str, hasta: str) -> list[dict]:
+    """Retorna todas las citas (cualquier estado) con fecha entre desde y hasta.
+
+    Las fechas son ISO (YYYY-MM-DD), ambas inclusive. Pensado para reportes:
+    incluye canceladas y completadas, a diferencia de get_citas_cliente.
+    """
+    table = get_table()
+    items: list[dict] = []
+    scan_kwargs = {
+        "FilterExpression": Attr("PK").begins_with("APPOINTMENT#")
+        & Attr("fecha").between(desde, hasta),
+    }
+    while True:
+        resp = table.scan(**scan_kwargs)
+        items.extend(resp["Items"])
+        if "LastEvaluatedKey" not in resp:
+            break
+        scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    return sorted(items, key=lambda x: (x["fecha"], x["hora"]))
+
+
+def resumen_citas_rango(desde: str, hasta: str) -> dict:
+    """Agrega métricas de citas en un rango de fechas (issue #15).
+
+    Retorna: total, por_estado (estado → cantidad), por_servicio
+    (nombre → cantidad) y tasa_cancelacion (canceladas / total, 0.0 si
+    no hay citas).
+    """
+    citas = get_citas_rango(desde, hasta)
+    por_estado: dict[str, int] = {}
+    por_servicio: dict[str, int] = {}
+    for c in citas:
+        estado = c.get("estado", "desconocido")
+        por_estado[estado] = por_estado.get(estado, 0) + 1
+        servicio = c.get("servicio_nombre", "Sin servicio")
+        por_servicio[servicio] = por_servicio.get(servicio, 0) + 1
+    total = len(citas)
+    canceladas = por_estado.get("cancelada", 0)
+    return {
+        "desde": desde,
+        "hasta": hasta,
+        "total": total,
+        "por_estado": por_estado,
+        "por_servicio": por_servicio,
+        "tasa_cancelacion": (canceladas / total) if total else 0.0,
+    }
+
+
 def bloquear_fecha(profesional_id: int, fecha: str, motivo: str = ""):
     """Bloquea un día completo para un profesional."""
     table = get_table()

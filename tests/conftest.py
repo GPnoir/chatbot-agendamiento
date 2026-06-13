@@ -13,6 +13,15 @@ os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "0")
 os.environ.setdefault("WHATSAPP_VERIFY_TOKEN", "test_verify_token")
 os.environ.setdefault("TELEGRAM_WEBHOOK_SECRET", "test_telegram_secret")
 
+# Credenciales AWS falsas: con el mock de moto activo (fixture autouse
+# dynamo_mock_table) ninguna llamada boto3 debe salir a AWS real, y estas
+# credenciales garantizan que un descuido tampoco pueda autenticarse.
+os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
+os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
+os.environ.setdefault("AWS_SECURITY_TOKEN", "testing")
+os.environ.setdefault("AWS_SESSION_TOKEN", "testing")
+os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -55,6 +64,62 @@ def clear_chatbot_sessions():
     chatbot_module._sessions.clear()
     rate_limiter.reset()
     yield
+
+
+@pytest.fixture(autouse=True)
+def dynamo_mock_table():
+    """Tabla DynamoDB simulada con moto, fresca para cada test (issue #16).
+
+    Crea la tabla con el mismo esquema de template.yaml (PK/SK + GSI1 + TTL),
+    la siembra con init_db() y la inyecta en los singletons de
+    database_dynamo y session_store. Así todo el stack Lambda
+    (lambda_handler, chatbot_lambda, session_store, rate_limiter dynamo)
+    es testeable sin credenciales AWS y sin tocar la tabla de producción.
+    """
+    import boto3
+    from moto import mock_aws
+
+    import database_dynamo
+    import session_store
+
+    with mock_aws():
+        dynamo = boto3.resource("dynamodb", region_name="us-east-1")
+        table = dynamo.create_table(
+            TableName=database_dynamo.TABLE_NAME,
+            BillingMode="PAY_PER_REQUEST",
+            AttributeDefinitions=[
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
+                {"AttributeName": "GSI1PK", "AttributeType": "S"},
+                {"AttributeName": "GSI1SK", "AttributeType": "S"},
+            ],
+            KeySchema=[
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "GSI1",
+                    "KeySchema": [
+                        {"AttributeName": "GSI1PK", "KeyType": "HASH"},
+                        {"AttributeName": "GSI1SK", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
+            ],
+        )
+        table.wait_until_exists()
+
+        original_db_table = database_dynamo._table
+        original_session_table = session_store._table
+        database_dynamo._table = table
+        session_store._table = table
+        try:
+            database_dynamo.init_db()
+            yield table
+        finally:
+            database_dynamo._table = original_db_table
+            session_store._table = original_session_table
 
 
 @pytest.fixture

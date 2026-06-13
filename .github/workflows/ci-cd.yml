@@ -29,7 +29,7 @@ jobs:
       - name: Run unit & integration tests
         run: |
           source .venv/bin/activate
-          pytest tests/test_chatbot_unit.py tests/test_database_unit.py tests/test_server_integration.py tests/test_security_and_overlap.py -v --tb=short
+          pytest tests/test_chatbot_unit.py tests/test_database_unit.py tests/test_lambda_moto_unit.py tests/test_telegram_buttons_unit.py tests/test_metrics_unit.py tests/test_server_integration.py tests/test_security_and_overlap.py -v --tb=short
 
       - name: Run Playwright E2E tests
         run: |

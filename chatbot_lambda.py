@@ -421,12 +421,37 @@ def _handle_admin_command(text: str) -> str | None:
             lines.append(f"  {c['hora']} - {c.get('servicio_nombre', '?')}")
         return "\n".join(lines)
 
+    elif cmd == "/reporte":
+        # /reporte [semana|mes] — métricas de citas del período
+        from datetime import date, timedelta
+        periodo = parts[1].lower() if len(parts) >= 2 else "semana"
+        dias = 30 if periodo == "mes" else 7
+        hasta = date.today()
+        desde = hasta - timedelta(days=dias - 1)
+        resumen = db.resumen_citas_rango(desde.isoformat(), hasta.isoformat())
+        lines = [
+            f"📊 Reporte {periodo} ({desde.strftime('%d/%m')} → {hasta.strftime('%d/%m')}):\n",
+            f"Total citas: {resumen['total']}",
+            f"✅ Confirmadas: {resumen['por_estado'].get('confirmada', 0)}",
+            f"❌ Canceladas: {resumen['por_estado'].get('cancelada', 0)}",
+            f"✔️ Completadas: {resumen['por_estado'].get('completada', 0)}",
+            f"Tasa de cancelación: {resumen['tasa_cancelacion']:.0%}",
+        ]
+        if resumen["por_servicio"]:
+            lines.append("\nPor servicio:")
+            for nombre, cantidad in sorted(
+                resumen["por_servicio"].items(), key=lambda kv: -kv[1]
+            ):
+                lines.append(f"• {nombre}: {cantidad}")
+        return "\n".join(lines)
+
     elif cmd == "/ayuda":
         return (
             "🔧 Comandos admin:\n"
             "/bloquear 2026-06-15 → bloquea día completo\n"
             "/bloquear 2026-06-15 10:00 → bloquea hora\n"
             "/desbloquear 2026-06-15 → desbloquea día\n"
-            "/agenda → citas de hoy"
+            "/agenda → citas de hoy\n"
+            "/reporte [semana|mes] → métricas de citas"
         )
     return None

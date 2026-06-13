@@ -83,26 +83,28 @@ sam local invoke                          # Test Lambda locally
 
 ## Known Security Gaps (Priority)
 
-1. Rate limiter is IN-MEMORY — resets on every Lambda cold start (useless in production)
-2. Input sanitization is only text.strip() + null bytes — no length enforcement in handler
-3. No request body size limits on FastAPI endpoints
-4. No CORS configuration
-5. Admin endpoint uses TELEGRAM_WEBHOOK_SECRET as auth token (weak, shared secret)
-6. No structured logging — print/logger.info only
-7. No CloudWatch alarms or monitoring
+All initial gaps resolved (June 2026):
+
+1. ~~Rate limiter in-memory~~ → DynamoDB backend (RATE_LIMITER_BACKEND=dynamo)
+2. ~~Weak input sanitization~~ → input_validation.py (length, control chars, structural)
+3. ~~No body size limits~~ → _BodySizeLimitMiddleware (413 over 1 MiB)
+4. ~~No CORS~~ → CORSMiddleware via CORS_ORIGINS config
+5. ~~Weak admin auth~~ → Bearer ADMIN_API_KEY with hmac.compare_digest
+6. ~~No structured logging~~ → aws-lambda-powertools (observability.py)
+7. ~~No alarms~~ → CloudWatch alarms in template.yaml + optional AlarmEmail
 
 ## Open Issues (GitHub)
 
 - #20 DynamoDB backup (DONE — PITR enabled in template.yaml)
-- #19 Structured logging
-- #17 Monitoring/alarms (CloudWatch)
-- #16 Lambda mock tests (moto)
-- #15 Metrics/reports
+- #19 Structured logging (DONE — observability.py)
+- #17 Monitoring/alarms (DONE — CloudWatch alarms in template.yaml)
+- #16 Lambda mock tests (DONE — moto fixture in tests/conftest.py + test_lambda_moto_unit.py)
+- #15 Metrics/reports (DONE — /reporte admin command + GET /admin/reporte)
 - #14 Google Calendar export
 - #13 Payment integration
 - #12 Multi-professional support
 - #11 Smart rescheduling
-- #10 Interactive buttons (Telegram inline keyboard)
+- #10 Interactive buttons (DONE — telegram_ui.py + callback_query in webhook)
 
 ## Code Style
 
