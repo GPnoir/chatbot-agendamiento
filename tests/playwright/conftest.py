@@ -59,13 +59,32 @@ def build_test_app():
     return app
 
 
-test_app = build_test_app()
+@pytest.fixture(scope="package", autouse=True)
+def _restore_whatsapp_globals():
+    """Restaura los globals de whatsapp_bot al salir del paquete playwright.
+
+    build_test_app() los muta con credenciales E2E; sin esta restauración,
+    los tests de integración que corren después en el mismo proceso
+    (pytest suite completa) verían el verify token E2E y fallarían.
+    """
+    import channels.whatsapp_bot as wb
+
+    originals = (wb.send_message, wb.WHATSAPP_APP_SECRET, wb.WHATSAPP_VERIFY_TOKEN)
+    yield
+    wb.send_message, wb.WHATSAPP_APP_SECRET, wb.WHATSAPP_VERIFY_TOKEN = originals
 
 
-@pytest.fixture(scope="session")
-def server_url() -> Generator[str, None, None]:
-    """Arranca uvicorn en un hilo de fondo y devuelve la URL."""
+@pytest.fixture(scope="package")
+def server_url(_restore_whatsapp_globals) -> Generator[str, None, None]:
+    """Arranca uvicorn en un hilo de fondo y devuelve la URL.
+
+    Construye la app aquí (no a nivel de módulo) para que la mutación de
+    globals ocurra después de que _restore_whatsapp_globals capture los
+    valores originales.
+    """
     import socket
+
+    test_app = build_test_app()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
@@ -93,7 +112,7 @@ def server_url() -> Generator[str, None, None]:
     thread.join(timeout=5)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="package")
 def api_context(
     playwright: Playwright, server_url: str
 ) -> Generator[APIRequestContext, None, None]:
