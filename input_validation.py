@@ -104,6 +104,40 @@ def validate_telegram_payload(data: object) -> bool:
     return True
 
 
+def validate_telegram_callback(data: object) -> bool:
+    """Perform a structural check on a parsed Telegram callback_query update.
+
+    Returns ``True`` only when the update carries a processable callback:
+    ``callback_query`` must be a dict with a ``str`` ``id``, ``from.id``
+    present, a ``str`` ``data`` payload, and ``message.chat.id`` present
+    (needed as the reply destination).
+
+    The ``data`` value is user-controlled input — callers must still run it
+    through :func:`validate_message_text` before processing.
+    """
+    if not isinstance(data, dict):
+        return False
+    cq = data.get("callback_query")
+    if not isinstance(cq, dict):
+        return False
+    if not isinstance(cq.get("id"), str):
+        return False
+    from_field = cq.get("from")
+    if not isinstance(from_field, dict):
+        return False
+    if not isinstance(from_field.get("id"), (int, str)):
+        return False
+    if not isinstance(cq.get("data"), str):
+        return False
+    message = cq.get("message")
+    if not isinstance(message, dict):
+        return False
+    chat = message.get("chat")
+    if not isinstance(chat, dict) or "id" not in chat:
+        return False
+    return True
+
+
 def validate_whatsapp_payload(data: object) -> bool:
     """Perform a structural check on a parsed WhatsApp webhook payload.
 

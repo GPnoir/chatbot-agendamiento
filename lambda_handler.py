@@ -18,12 +18,14 @@ from config import (
 )
 from input_validation import (
     add_security_middleware,
+    validate_telegram_callback,
     validate_telegram_payload,
     validate_whatsapp_payload,
     validate_message_text,
     is_oversized,
 )
 from observability import get_logger, log_message_handled
+from telegram_ui import build_reply_markup
 
 logger = get_logger(__name__)
 
@@ -298,11 +300,22 @@ async def _send_whatsapp(to: str, text: str):
         await client.post(META_API_URL, json=payload, headers=headers)
 
 
-async def _send_telegram(chat_id: int, text: str):
+async def _send_telegram(chat_id: int, text: str, reply_markup: dict | None = None):
     from config import TELEGRAM_BOT_TOKEN
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     async with httpx.AsyncClient(timeout=10.0) as client:
-        await client.post(url, json={"chat_id": chat_id, "text": text})
+        await client.post(url, json=payload)
+
+
+async def _answer_telegram_callback(callback_query_id: str):
+    """Confirma el callback ante Telegram para detener el spinner del botón."""
+    from config import TELEGRAM_BOT_TOKEN
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await client.post(url, json={"callback_query_id": callback_query_id})
 
 
 @app.get("/whatsapp/webhook")
@@ -362,6 +375,38 @@ async def telegram_webhook(request: Request):
         logger.warning("telegram webhook rejected: secret mismatch")
         return JSONResponse(status_code=403, content={"error": "forbidden"})
     data = await request.json()
+
+    # Updates de botones inline (callback_query): el callback_data del botón
+    # se procesa igual que texto del usuario — misma sanitización y rate limit.
+    if isinstance(data, dict) and "callback_query" in data:
+        if not validate_telegram_callback(data):
+            logger.debug("telegram webhook: callback failed structural validation, skipping")
+            return {"status": "ok"}
+        cq = data["callback_query"]
+        user_id = str(cq["from"]["id"])
+        chat_id = cq["message"]["chat"]["id"]
+        clean = validate_message_text(cq["data"])
+        if clean is None:
+            # callback_data inválido u oversized solo puede ser un payload
+            # forjado (los botones legítimos llevan datos cortos): se ignora
+            return {"status": "ok"}
+        await _answer_telegram_callback(cq["id"])
+        try:
+            t0 = time.monotonic()
+            response = chatbot.handle_message("telegram", user_id, clean)
+            duration_ms = (time.monotonic() - t0) * 1000
+            log_message_handled(
+                logger,
+                channel="telegram",
+                user_id=user_id,
+                action="callback_handled",
+                duration_ms=duration_ms,
+            )
+            await _send_telegram(chat_id, response, reply_markup=build_reply_markup(response))
+        except (KeyError, TypeError) as e:
+            logger.error("telegram webhook: callback handling error", extra={"error": str(e)})
+        return {"status": "ok"}
+
     if not validate_telegram_payload(data):
         logger.debug("telegram webhook: payload failed structural validation, skipping")
         return {"status": "ok"}
@@ -388,7 +433,7 @@ async def telegram_webhook(request: Request):
             action="message_handled",
             duration_ms=duration_ms,
         )
-        await _send_telegram(chat_id, response)
+        await _send_telegram(chat_id, response, reply_markup=build_reply_markup(response))
     except (KeyError, TypeError) as e:
         logger.error("telegram webhook: message handling error", extra={"error": str(e)})
     return {"status": "ok"}
