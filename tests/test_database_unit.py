@@ -192,6 +192,46 @@ class TestCitas:
         fechas = [c["fecha"] for c in citas]
         assert ayer not in fechas
 
+    def test_historial_incluye_pasadas_y_canceladas(self, fresh_db):
+        """get_historial_cliente retorna todo: pasadas, futuras y canceladas.
+
+        A diferencia de get_citas_cliente (solo confirmadas futuras), el
+        historial muestra la trayectoria completa del cliente.
+        """
+        from datetime import timedelta
+        cliente = fresh_db.get_or_create_cliente("test", TEST_USER)
+        servicios = fresh_db.get_servicios()
+        profesionales = fresh_db.get_profesionales()
+        ayer = (date.today() - timedelta(days=2)).isoformat()
+        manana = (date.today() + timedelta(days=2)).isoformat()
+        fresh_db.crear_cita(cliente["id"], servicios[0]["id"], profesionales[0]["id"], ayer, "10:00")
+        fresh_db.crear_cita(cliente["id"], servicios[0]["id"], profesionales[0]["id"], manana, "11:00")
+        cancelada = fresh_db.crear_cita(cliente["id"], servicios[0]["id"], profesionales[0]["id"], manana, "12:00")
+        fresh_db.cancelar_cita(cancelada["id"])
+        historial = fresh_db.get_historial_cliente(cliente["id"])
+        assert len(historial) == 3
+        assert "cancelada" in {c["estado"] for c in historial}
+        # incluye nombre de servicio para mostrarlo al usuario
+        assert all("servicio_nombre" in c for c in historial)
+
+    def test_historial_orden_descendente(self, fresh_db):
+        """El historial llega con la cita más reciente primero."""
+        from datetime import timedelta
+        cliente = fresh_db.get_or_create_cliente("test", TEST_USER)
+        servicios = fresh_db.get_servicios()
+        profesionales = fresh_db.get_profesionales()
+        antigua = (date.today() - timedelta(days=5)).isoformat()
+        reciente = (date.today() + timedelta(days=5)).isoformat()
+        fresh_db.crear_cita(cliente["id"], servicios[0]["id"], profesionales[0]["id"], antigua, "10:00")
+        fresh_db.crear_cita(cliente["id"], servicios[0]["id"], profesionales[0]["id"], reciente, "10:00")
+        historial = fresh_db.get_historial_cliente(cliente["id"])
+        assert historial[0]["fecha"] == reciente
+        assert historial[-1]["fecha"] == antigua
+
+    def test_historial_vacio_retorna_lista(self, fresh_db):
+        cliente = fresh_db.get_or_create_cliente("test", TEST_USER)
+        assert fresh_db.get_historial_cliente(cliente["id"]) == []
+
 
 class TestDisponibilidadFechas:
     def test_no_devuelve_fechas_pasadas(self, fresh_db):

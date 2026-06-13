@@ -99,6 +99,17 @@ def _handle_idle(session, canal, canal_user_id, text):
             lines.append(f"• {c['servicio_nombre']} con {c['profesional_nombre']}\n  📅 {c['fecha']} a las {c['hora']}")
         lines.append("\nEscribe *menu* para volver.")
         return "\n".join(lines)
+    elif text == "5":
+        cliente = db.get_or_create_cliente(canal, canal_user_id)
+        historial = db.get_historial_cliente(cliente["id"])
+        if not historial:
+            return "No tienes historial de citas. Escribe *menu* para volver."
+        lines = ["📜 Historial de citas:\n"]
+        for c in historial[:10]:
+            estado = {"confirmada": "✅", "cancelada": "❌", "completada": "✔️"}.get(c["estado"], "")
+            lines.append(f"{estado} {c.get('servicio_nombre', '')} - {c['fecha']} {c['hora']}")
+        lines.append("\nEscribe *menu* para volver.")
+        return "\n".join(lines)
     return MENSAJES["bienvenida"].format(**NEGOCIO)
 
 
