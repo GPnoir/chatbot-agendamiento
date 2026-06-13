@@ -65,6 +65,27 @@ if [ -n "${ALARM_EMAIL:-}" ]; then
     DEPLOY_ARGS+=("AlarmEmail=${ALARM_EMAIL}")
 fi
 
+# Google Calendar (issue #14): opt-in. Sólo se pasan si la var está definida;
+# omitidos, mantienen el valor actual del stack (feature OFF por default).
+if [ -n "${GOOGLE_CALENDAR_ENABLED:-}" ]; then
+    DEPLOY_ARGS+=("GoogleCalendarEnabled=${GOOGLE_CALENDAR_ENABLED}")
+fi
+if [ -n "${GOOGLE_OAUTH_CLIENT_ID:-}" ]; then
+    DEPLOY_ARGS+=("GoogleOAuthClientId=${GOOGLE_OAUTH_CLIENT_ID}")
+fi
+if [ -n "${GOOGLE_OAUTH_CLIENT_SECRET:-}" ]; then
+    DEPLOY_ARGS+=("GoogleOAuthClientSecret=${GOOGLE_OAUTH_CLIENT_SECRET}")
+fi
+if [ -n "${GOOGLE_OAUTH_REFRESH_TOKEN:-}" ]; then
+    DEPLOY_ARGS+=("GoogleOAuthRefreshToken=${GOOGLE_OAUTH_REFRESH_TOKEN}")
+fi
+if [ -n "${GOOGLE_CALENDAR_ID:-}" ]; then
+    DEPLOY_ARGS+=("GoogleCalendarId=${GOOGLE_CALENDAR_ID}")
+fi
+if [ -n "${GOOGLE_CALENDAR_TIMEZONE:-}" ]; then
+    DEPLOY_ARGS+=("GoogleCalendarTimezone=${GOOGLE_CALENDAR_TIMEZONE}")
+fi
+
 sam deploy "${DEPLOY_ARGS[@]}"
 
 # Outputs

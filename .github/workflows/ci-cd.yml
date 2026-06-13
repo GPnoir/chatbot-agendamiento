@@ -64,12 +64,38 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: us-east-1
           ALARM_EMAIL: ${{ secrets.ALARM_EMAIL }}
+          GOOGLE_CALENDAR_ENABLED: ${{ secrets.GOOGLE_CALENDAR_ENABLED }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          GOOGLE_CALENDAR_TIMEZONE: ${{ secrets.GOOGLE_CALENDAR_TIMEZONE }}
         run: |
           # sam rejects empty parameter-overrides values ("Key=" is invalid),
           # so optional parameters are only included when the secret is set
           EXTRA_PARAMS=()
           if [ -n "$ALARM_EMAIL" ]; then
             EXTRA_PARAMS+=("AlarmEmail=$ALARM_EMAIL")
+          fi
+          # Google Calendar (issue #14): opt-in. Omitted params keep their
+          # current stack value (feature stays OFF unless secrets are set).
+          if [ -n "$GOOGLE_CALENDAR_ENABLED" ]; then
+            EXTRA_PARAMS+=("GoogleCalendarEnabled=$GOOGLE_CALENDAR_ENABLED")
+          fi
+          if [ -n "$GOOGLE_OAUTH_CLIENT_ID" ]; then
+            EXTRA_PARAMS+=("GoogleOAuthClientId=$GOOGLE_OAUTH_CLIENT_ID")
+          fi
+          if [ -n "$GOOGLE_OAUTH_CLIENT_SECRET" ]; then
+            EXTRA_PARAMS+=("GoogleOAuthClientSecret=$GOOGLE_OAUTH_CLIENT_SECRET")
+          fi
+          if [ -n "$GOOGLE_OAUTH_REFRESH_TOKEN" ]; then
+            EXTRA_PARAMS+=("GoogleOAuthRefreshToken=$GOOGLE_OAUTH_REFRESH_TOKEN")
+          fi
+          if [ -n "$GOOGLE_CALENDAR_ID" ]; then
+            EXTRA_PARAMS+=("GoogleCalendarId=$GOOGLE_CALENDAR_ID")
+          fi
+          if [ -n "$GOOGLE_CALENDAR_TIMEZONE" ]; then
+            EXTRA_PARAMS+=("GoogleCalendarTimezone=$GOOGLE_CALENDAR_TIMEZONE")
           fi
           sam deploy \
             --stack-name chatbot-agendamiento \

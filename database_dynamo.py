@@ -7,6 +7,7 @@ import boto3
 from boto3.dynamodb.conditions import Key, Attr
 
 from config import SERVICIOS, PROFESIONALES, HORARIOS_DEFAULT
+import google_calendar
 
 TABLE_NAME = os.getenv("DYNAMODB_TABLE", "chatbot-agendamiento")
 _table = None
@@ -188,6 +189,11 @@ def crear_cita(cliente_id: str, servicio_id: int, profesional_id: int, fecha: st
     prof = next((p for p in profesionales if p["id"] == profesional_id), None)
     if prof:
         item["profesional_nombre"] = prof["nombre"]
+    # Sync best-effort a Google Calendar (issue #14): guardamos el event id
+    # para poder borrar/actualizar el evento al cancelar o modificar la cita.
+    event_id = google_calendar.sync_create(item)
+    if event_id:
+        item["gcal_event_id"] = event_id
     table.put_item(Item=item)
     return item
 
@@ -213,11 +219,17 @@ def get_historial_cliente(cliente_id: str) -> list[dict]:
 
 def cancelar_cita(cita_pk: str, cita_sk: str):
     table = get_table()
+    # Leemos la cita primero para recuperar el event id de Google Calendar.
+    resp = table.get_item(Key={"PK": cita_pk, "SK": cita_sk})
+    item = resp.get("Item")
     table.update_item(
         Key={"PK": cita_pk, "SK": cita_sk},
         UpdateExpression="SET estado = :s, updated_at = :u",
         ExpressionAttributeValues={":s": "cancelada", ":u": datetime.utcnow().isoformat()},
     )
+    # Sync best-effort a Google Calendar (issue #14): borra el evento asociado.
+    if item and item.get("gcal_event_id"):
+        google_calendar.sync_cancel(item["gcal_event_id"])
 
 
 def modificar_cita(cita_pk: str, cita_sk: str, nueva_fecha: str, nueva_hora: str):
