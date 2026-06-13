@@ -18,6 +18,12 @@ Globals:
         WHATSAPP_VERIFY_TOKEN: !Ref WhatsAppVerifyToken
         WHATSAPP_APP_SECRET: !Ref WhatsAppAppSecret
         ADMIN_API_KEY: !Ref AdminApiKey
+        GOOGLE_CALENDAR_ENABLED: !Ref GoogleCalendarEnabled
+        GOOGLE_OAUTH_CLIENT_ID: !Ref GoogleOAuthClientId
+        GOOGLE_OAUTH_CLIENT_SECRET: !Ref GoogleOAuthClientSecret
+        GOOGLE_OAUTH_REFRESH_TOKEN: !Ref GoogleOAuthRefreshToken
+        GOOGLE_CALENDAR_ID: !Ref GoogleCalendarId
+        GOOGLE_CALENDAR_TIMEZONE: !Ref GoogleCalendarTimezone
 
 Parameters:
   TelegramBotToken:
@@ -53,6 +59,31 @@ Parameters:
       Optional email address for alarm notifications. When empty, alarms are
       created but no notifications are sent (still visible in CloudWatch console
       and dashboards).
+  # ── Google Calendar (issue #14) — opt-in, OFF by default ──────────
+  GoogleCalendarEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enable best-effort appointment sync to Google Calendar.
+  GoogleOAuthClientId:
+    Type: String
+    NoEcho: true
+    Default: ''
+  GoogleOAuthClientSecret:
+    Type: String
+    NoEcho: true
+    Default: ''
+  GoogleOAuthRefreshToken:
+    Type: String
+    NoEcho: true
+    Default: ''
+  GoogleCalendarId:
+    Type: String
+    Default: 'primary'
+    Description: Calendar ID to write events to ('primary' or the calendar address).
+  GoogleCalendarTimezone:
+    Type: String
+    Default: 'America/Santiago'
 
 Conditions:
   HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
