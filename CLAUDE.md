@@ -104,14 +104,42 @@ All initial gaps resolved (June 2026):
 
 - #20 DynamoDB backup (DONE — PITR enabled in template.yaml)
 - #19 Structured logging (DONE — observability.py)
+- #18 Custom domain for API Gateway (open — tecnico)
 - #17 Monitoring/alarms (DONE — CloudWatch alarms in template.yaml)
 - #16 Lambda mock tests (DONE — moto fixture in tests/conftest.py + test_lambda_moto_unit.py)
-- #15 Metrics/reports (DONE — /reporte admin command + GET /admin/reporte)
-- #14 Google Calendar export
-- #13 Payment integration
-- #12 Multi-professional support
-- #11 Smart rescheduling
+- #15 Metrics/reports (DONE — /reporte admin command + GET /admin/reporte + **Reporte dashboard UI** en /admin/panel)
+- #14 Google Calendar export (DONE — google_calendar.py, commit b816299)
+- #13 Payment integration (open — nice-to-have)
+- #12 Multi-professional support (open — nice-to-have)
+- #11 Smart rescheduling (open — nice-to-have)
 - #10 Interactive buttons (DONE — telegram_ui.py + callback_query in webhook)
+
+## Frontend / Diseño
+
+Sistema de diseño "papel neutro + acento botánico" documentado en `PRODUCT.md`
+y `DESIGN.md` (tokens OKLCH, tipografía serif+sans del sistema, motion, bans).
+Antes de tocar UI, leerlos. Aplica a:
+
+- **Portal admin** (`/admin/panel` en lambda_handler.py): login shell + 2 vistas
+  client-side (Agenda semanal + Reporte). El shell NO embebe datos ni secretos
+  (contrato cubierto por tests en test_security_and_overlap.py).
+- **Chatbot**: la "UI" es copy + estructura de mensajes (config.MENSAJES) +
+  botones inline (telegram_ui.py). Voz definida en PRODUCT.md.
+
+Para iterar diseño usar la skill `impeccable` (sub-comandos: critique, polish,
+craft, ...).
+
+### Bugs de diseño/UX por resolver
+
+- ~~**Opción 5 muerta:** la bienvenida ofrecía "5️⃣ Historial de citas" pero
+  `chatbot.py` solo manejaba 1–4.~~ RESUELTO — `chatbot_lambda.py` (producción)
+  ya la tenía; se implementó en `chatbot.py` + `database.get_historial_cliente`
+  para dejar ambos motores consistentes. Cubierto por TestHistorial
+  (test_chatbot_unit.py) y TestCitas (test_database_unit.py).
+
+> Recordatorio: `chatbot.py` (SQLite, dev local) y `chatbot_lambda.py`
+> (DynamoDB, prod) son dos motores paralelos — cambios de lógica de negocio
+> deben aplicarse en ambos.
 
 ## Code Style
 
