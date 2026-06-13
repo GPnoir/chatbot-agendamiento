@@ -116,6 +116,25 @@ async def admin_agenda(
     return {"fechas": fechas, "total": len(result), "citas": result}
 
 
+@app.get("/admin/reporte")
+async def admin_reporte(request: Request, desde: str = None, hasta: str = None):
+    """Métricas de citas en un rango (issue #15). Default: últimos 7 días.
+
+    Requiere Authorization: Bearer <ADMIN_API_KEY>.
+    """
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    from datetime import date as d, timedelta
+
+    try:
+        hasta_v = d.fromisoformat(hasta) if hasta else d.today()
+        desde_v = d.fromisoformat(desde) if desde else hasta_v - timedelta(days=6)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "invalid date format, use YYYY-MM-DD"})
+
+    return db.resumen_citas_rango(desde_v.isoformat(), hasta_v.isoformat())
+
+
 @app.get("/admin/panel")
 async def admin_panel():
     """Admin calendar panel — login shell only, no appointment data embedded."""
