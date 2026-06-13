@@ -72,6 +72,13 @@ sam local invoke                          # Test Lambda locally
 - Max citas por cliente: 3
 - Channels: Telegram + WhatsApp (same business logic, different adapters)
 
+## Branching
+
+- `main` — producción; cada push dispara deploy (GitHub Actions → SAM)
+- `dev` — rama de integración (default); los features salen y vuelven aquí
+- Feature branches (`feat/...`, `fix/...`) → PR a `dev`, merge con **squash**
+- Release: PR `dev` → `main`, merge con **merge commit** (no squash, para que las historias no diverjan)
+
 ## Workflow
 
 1. One feature/fix at a time
