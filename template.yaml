@@ -129,6 +129,11 @@ Resources:
           Properties:
             Path: /admin/agenda
             Method: get
+        AdminReporte:
+          Type: Api
+          Properties:
+            Path: /admin/reporte
+            Method: get
         AdminPanel:
           Type: Api
           Properties:

@@ -166,3 +166,56 @@ class TestAdminReporteEndpoint:
             headers={"Authorization": f"Bearer {VALID_KEY}"},
         )
         assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Panel admin — vista Reporte (UI de métricas, issue #15)
+# ---------------------------------------------------------------------------
+
+class TestAdminPanelDashboard:
+    """El panel admin sirve la vista de Reporte además de la Agenda.
+
+    El reporte se renderiza client-side consumiendo /admin/reporte con la
+    misma API key del login; el shell HTML no embebe datos ni secretos.
+    """
+
+    def test_panel_incluye_ambas_vistas(self, admin_client):
+        resp = admin_client.get("/admin/panel")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+        html = resp.text
+        assert 'id="view-agenda"' in html
+        assert 'id="view-reporte"' in html
+        # La vista de reporte consume el endpoint de métricas existente.
+        assert "/admin/reporte" in html
+
+    def test_panel_reporte_usa_authorization_header(self, admin_client):
+        html = admin_client.get("/admin/panel").text
+        assert "?token=" not in html
+        assert "location.search" not in html
+        assert "Authorization" in html
+
+    def test_panel_sin_paleta_material_ni_side_stripe(self, admin_client):
+        """Regresión de diseño: fuera el verde Material y el side-stripe."""
+        html = admin_client.get("/admin/panel").text
+        assert "#4caf50" not in html
+        assert "#2d5a27" not in html
+        assert "border-left:3px solid" not in html
+
+    def test_panel_sigue_siendo_login_shell(self, admin_client):
+        """El rediseño mantiene el contrato de seguridad del shell."""
+        html = admin_client.get("/admin/panel").text
+        assert "login-overlay" in html
+        assert "sessionStorage" in html
+        assert 'style="--days:7;display:none"' in html
+
+    def test_template_rutea_admin_reporte(self):
+        """API Gateway debe enrutar GET /admin/reporte.
+
+        El endpoint existe en FastAPI y pasa por TestClient, pero en prod solo
+        son alcanzables los paths declarados como evento Api en template.yaml.
+        Sin esta ruta, la vista Reporte recibiría 403 de API Gateway.
+        """
+        import pathlib
+        template = pathlib.Path(__file__).resolve().parents[1] / "template.yaml"
+        assert "Path: /admin/reporte" in template.read_text()
