@@ -18,6 +18,9 @@ Globals:
         WHATSAPP_VERIFY_TOKEN: !Ref WhatsAppVerifyToken
         WHATSAPP_APP_SECRET: !Ref WhatsAppAppSecret
         ADMIN_API_KEY: !Ref AdminApiKey
+        ADMIN_USERNAME: !Ref AdminUsername
+        ADMIN_PASSWORD_HASH: !Ref AdminPasswordHash
+        SESSION_SECRET: !Ref SessionSecret
         GOOGLE_CALENDAR_ENABLED: !Ref GoogleCalendarEnabled
         GOOGLE_OAUTH_CLIENT_ID: !Ref GoogleOAuthClientId
         GOOGLE_OAUTH_CLIENT_SECRET: !Ref GoogleOAuthClientSecret
@@ -51,6 +54,21 @@ Parameters:
     Type: String
     NoEcho: true
     Default: ''
+  AdminUsername:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Usuario del panel admin (login usuario+contraseña).
+  AdminPasswordHash:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Hash PBKDF2 de la contraseña (generar con scripts/hash_admin_password.py).
+  SessionSecret:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Clave HMAC para firmar los tokens de sesión del panel.
   AlarmEmail:
     Type: String
     NoEcho: true
@@ -170,6 +188,11 @@ Resources:
           Properties:
             Path: /admin/panel
             Method: get
+        AdminLogin:
+          Type: Api
+          Properties:
+            Path: /admin/login
+            Method: post
 
   # ── Reminder Lambda ────────────────────────────────────────────────
   ReminderFunction:
