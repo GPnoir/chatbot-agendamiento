@@ -347,3 +347,44 @@ class TestMultiChannel:
         chatbot.handle_message("telegram", "123", "menu")
         assert "telegram:123" not in chatbot._sessions
         assert "123" in chatbot._sessions
+
+
+# ── Opción 5: Historial de citas ──────────────────────────────────────
+class TestHistorial:
+    """Opción 5 del menú: historial completo (paridad con chatbot_lambda)."""
+
+    def test_opcion_5_sin_historial(self, fresh_db):
+        chatbot.handle_message("test", TEST_USER, "menu")
+        resp = chatbot.handle_message("test", TEST_USER, "5")
+        assert "historial" in resp.lower()
+
+    def test_opcion_5_lista_pasadas_y_canceladas(self, fresh_db):
+        from datetime import date, timedelta
+        cliente = db_module.get_or_create_cliente("test", TEST_USER)
+        servicios = db_module.get_servicios()
+        profesionales = db_module.get_profesionales()
+        ayer = (date.today() - timedelta(days=3)).isoformat()
+        db_module.crear_cita(cliente["id"], servicios[0]["id"], profesionales[0]["id"], ayer, "10:00")
+        cancelada = db_module.crear_cita(cliente["id"], servicios[0]["id"], profesionales[0]["id"], ayer, "11:00")
+        db_module.cancelar_cita(cancelada["id"])
+        chatbot.handle_message("test", TEST_USER, "menu")
+        resp = chatbot.handle_message("test", TEST_USER, "5")
+        assert "Historial" in resp
+        assert ayer in resp
+        # la cancelada se marca distinto de la confirmada
+        assert "❌" in resp
+
+    def test_opcion_5_distinta_de_opcion_4(self, fresh_db):
+        """Opción 4 (próximas) no muestra pasadas; opción 5 (historial) sí."""
+        from datetime import date, timedelta
+        cliente = db_module.get_or_create_cliente("test", TEST_USER)
+        servicios = db_module.get_servicios()
+        profesionales = db_module.get_profesionales()
+        ayer = (date.today() - timedelta(days=4)).isoformat()
+        db_module.crear_cita(cliente["id"], servicios[0]["id"], profesionales[0]["id"], ayer, "09:00")
+        chatbot.handle_message("test", TEST_USER, "menu")
+        proximas = chatbot.handle_message("test", TEST_USER, "4")
+        chatbot.handle_message("test", TEST_USER, "menu")
+        historial = chatbot.handle_message("test", TEST_USER, "5")
+        assert ayer not in proximas
+        assert ayer in historial
