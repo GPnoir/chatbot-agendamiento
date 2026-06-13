@@ -193,6 +193,27 @@ def get_citas_cliente(cliente_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_historial_cliente(cliente_id: int) -> list[dict]:
+    """Retorna todas las citas del cliente (pasadas, futuras y canceladas).
+
+    A diferencia de get_citas_cliente (solo confirmadas desde hoy), incluye
+    la trayectoria completa, ordenada de la más reciente a la más antigua.
+    Espeja database_dynamo.get_historial_cliente para mantener ambos motores
+    consistentes.
+    """
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT c.*, s.nombre as servicio_nombre, p.nombre as profesional_nombre
+        FROM citas c
+        JOIN servicios s ON c.servicio_id = s.id
+        JOIN profesionales p ON c.profesional_id = p.id
+        WHERE c.cliente_id = ?
+        ORDER BY c.fecha DESC, c.hora DESC
+    """, (cliente_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def cancelar_cita(cita_id: int):
     conn = get_db()
     conn.execute("UPDATE citas SET estado = 'cancelada', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (cita_id,))

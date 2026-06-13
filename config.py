@@ -29,6 +29,16 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://localhost:8000")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
+# --- Google Calendar (issue #14) ---
+# Sync best-effort de citas al calendar del profesional vía OAuth2 refresh token.
+# Apagado por defecto: sin la flag (o sin credenciales) todo es no-op.
+GOOGLE_CALENDAR_ENABLED = os.getenv("GOOGLE_CALENDAR_ENABLED", "false").lower() == "true"
+GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
+GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
+GOOGLE_OAUTH_REFRESH_TOKEN = os.getenv("GOOGLE_OAUTH_REFRESH_TOKEN", "")
+GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
+GOOGLE_CALENDAR_TIMEZONE = os.getenv("GOOGLE_CALENDAR_TIMEZONE", "America/Santiago")
+
 # --- Negocio ---
 NEGOCIO = {
     "nombre": "Centro de Flores de Bach",
