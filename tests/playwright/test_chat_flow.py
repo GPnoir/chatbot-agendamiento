@@ -154,10 +154,14 @@ class TestChatE2EModify:
             _send(api_context, texto)
 
         chatbot_responses.clear()
-        for texto in ["menu", "2", "1", "1", "1"]:
+        # Modificar ahora pide confirmación tras elegir la nueva hora.
+        for texto in ["menu", "2", "1", "1", "1", "si"]:
             _send(api_context, texto)
 
-        assert any("modificada" in r["text"].lower() or "✅" in r["text"] for r in chatbot_responses)
+        assert any(
+            "reagendada" in r["text"].lower() or "modificada" in r["text"].lower() or "✅" in r["text"]
+            for r in chatbot_responses
+        )
 
 
 class TestChatE2EMultipleUsers:
