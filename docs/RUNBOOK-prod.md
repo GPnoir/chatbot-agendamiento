@@ -35,15 +35,26 @@ todos `NoEcho`):
 | `WHATSAPP_VERIFY_TOKEN` | Sí (MinLength 1) | Verificación del webhook de Meta |
 | `WHATSAPP_TOKEN` / `WHATSAPP_PHONE_NUMBER_ID` | Sí (si se usa WhatsApp) | Envío de mensajes |
 | `WHATSAPP_APP_SECRET` | Recomendado | Valida firma `X-Hub-Signature-256` |
-| `ADMIN_API_KEY` | **Sí, para el panel** | Sin esto el panel/Reporte rechaza todo (fail-closed) |
+| `ADMIN_USERNAME` | **Sí, para el panel** | Usuario del login del panel |
+| `ADMIN_PASSWORD_HASH` | **Sí, para el panel** | Hash PBKDF2 de la contraseña (login del panel) |
+| `SESSION_SECRET` | **Sí, para el panel** | Firma los tokens de sesión; rotarlo cierra sesiones |
+| `ADMIN_API_KEY` | Recomendado | Credencial break-glass para los endpoints admin (curl/automación) |
 | `ALARM_EMAIL` | Opcional | Notificaciones de alarmas (SNS) |
 | `GOOGLE_*` | Opcional | Solo si se activa la sync de Google Calendar |
+
+**Generar las credenciales del panel:**
+```bash
+python scripts/hash_admin_password.py   # imprime ADMIN_PASSWORD_HASH y un SESSION_SECRET
+```
+Cargá `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH` y `SESSION_SECRET` como secrets. El login
+del panel es `POST /admin/login` (usuario+contraseña → token de sesión de 8 h).
 
 **Infra:** el runner **self-hosted debe estar online**, cuenta AWS con permisos de
 CloudFormation/Lambda/DynamoDB/API Gateway, SAM CLI en el runner.
 
-> **Crítico:** definí `ADMIN_API_KEY` antes de este deploy. Es la única forma de
-> entrar al panel admin, y `_check_admin_auth` falla cerrado si está vacío.
+> **Crítico:** definí `ADMIN_USERNAME`/`ADMIN_PASSWORD_HASH`/`SESSION_SECRET` antes de este
+> deploy. Sin ellos el login del panel falla cerrado. `ADMIN_API_KEY` sigue sirviendo como
+> credencial break-glass para automatización/curl contra los endpoints admin.
 
 ## 3. Post-deploy: configuración externa
 

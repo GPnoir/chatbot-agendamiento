@@ -64,6 +64,9 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: us-east-1
           ALARM_EMAIL: ${{ secrets.ALARM_EMAIL }}
+          ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
+          ADMIN_PASSWORD_HASH: ${{ secrets.ADMIN_PASSWORD_HASH }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
           GOOGLE_CALENDAR_ENABLED: ${{ secrets.GOOGLE_CALENDAR_ENABLED }}
           GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
@@ -76,6 +79,16 @@ jobs:
           EXTRA_PARAMS=()
           if [ -n "$ALARM_EMAIL" ]; then
             EXTRA_PARAMS+=("AlarmEmail=$ALARM_EMAIL")
+          fi
+          # Auth del panel (usuario+contraseña): se pasan solo si el secret está set.
+          if [ -n "$ADMIN_USERNAME" ]; then
+            EXTRA_PARAMS+=("AdminUsername=$ADMIN_USERNAME")
+          fi
+          if [ -n "$ADMIN_PASSWORD_HASH" ]; then
+            EXTRA_PARAMS+=("AdminPasswordHash=$ADMIN_PASSWORD_HASH")
+          fi
+          if [ -n "$SESSION_SECRET" ]; then
+            EXTRA_PARAMS+=("SessionSecret=$SESSION_SECRET")
           fi
           # Google Calendar (issue #14): opt-in. Omitted params keep their
           # current stack value (feature stays OFF unless secrets are set).

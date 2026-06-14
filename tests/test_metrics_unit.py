@@ -219,3 +219,16 @@ class TestAdminPanelDashboard:
         import pathlib
         template = pathlib.Path(__file__).resolve().parents[1] / "template.yaml"
         assert "Path: /admin/reporte" in template.read_text()
+
+    def test_panel_login_usuario_password(self, admin_client):
+        """El login del panel es usuario+contraseña contra POST /admin/login."""
+        html = admin_client.get("/admin/panel").text
+        assert 'id="login-user"' in html
+        assert 'id="login-pass"' in html
+        assert "/admin/login" in html
+
+    def test_template_rutea_admin_login(self):
+        """API Gateway debe enrutar POST /admin/login (si no, 403 en prod)."""
+        import pathlib
+        template = pathlib.Path(__file__).resolve().parents[1] / "template.yaml"
+        assert "Path: /admin/login" in template.read_text()

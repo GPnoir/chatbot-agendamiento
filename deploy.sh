@@ -61,6 +61,16 @@ fi
 if [ -n "${WHATSAPP_APP_SECRET:-}" ]; then
     DEPLOY_ARGS+=("WhatsAppAppSecret=${WHATSAPP_APP_SECRET}")
 fi
+# Auth del panel (usuario+contraseña): opcionales; omitidos mantienen el valor del stack.
+if [ -n "${ADMIN_USERNAME:-}" ]; then
+    DEPLOY_ARGS+=("AdminUsername=${ADMIN_USERNAME}")
+fi
+if [ -n "${ADMIN_PASSWORD_HASH:-}" ]; then
+    DEPLOY_ARGS+=("AdminPasswordHash=${ADMIN_PASSWORD_HASH}")
+fi
+if [ -n "${SESSION_SECRET:-}" ]; then
+    DEPLOY_ARGS+=("SessionSecret=${SESSION_SECRET}")
+fi
 if [ -n "${ALARM_EMAIL:-}" ]; then
     DEPLOY_ARGS+=("AlarmEmail=${ALARM_EMAIL}")
 fi
