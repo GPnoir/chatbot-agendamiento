@@ -198,6 +198,21 @@ Resources:
           Properties:
             Path: /admin/cita/cancelar
             Method: post
+        AdminClientes:
+          Type: Api
+          Properties:
+            Path: /admin/clientes
+            Method: get
+        AdminCliente:
+          Type: Api
+          Properties:
+            Path: /admin/cliente
+            Method: get
+        AdminAgregarNota:
+          Type: Api
+          Properties:
+            Path: /admin/cliente/nota
+            Method: post
 
   # ── Reminder Lambda ────────────────────────────────────────────────
   ReminderFunction:
