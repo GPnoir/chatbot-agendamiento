@@ -25,6 +25,7 @@ from input_validation import (
     validate_telegram_payload,
     validate_whatsapp_payload,
     validate_message_text,
+    sanitize_text,
     is_oversized,
 )
 from observability import get_logger, log_message_handled
@@ -222,6 +223,69 @@ async def admin_cancelar_cita(request: Request):
     return {"status": "ok"}
 
 
+# ── Fichas de pacientes ───────────────────────────────────────────────
+def _clean_item(d: dict) -> dict:
+    """Quita claves internas de DynamoDB y convierte Decimal a int."""
+    from decimal import Decimal
+    return {k: (int(v) if isinstance(v, Decimal) else v) for k, v in d.items()
+            if k not in ("PK", "SK", "GSI1PK", "GSI1SK")}
+
+
+@app.get("/admin/clientes")
+async def admin_clientes(request: Request):
+    """Lista de pacientes para las fichas. Requiere auth admin."""
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    clientes = db.get_clientes()
+    result = [{
+        "id": c.get("id"),
+        "nombre": c.get("nombre", ""),
+        "canal": c.get("canal", ""),
+        "canal_user_id": c.get("canal_user_id", ""),
+    } for c in clientes]
+    return {"total": len(result), "clientes": result}
+
+
+@app.get("/admin/cliente")
+async def admin_cliente(request: Request, id: str = None):
+    """Ficha de un paciente: info + histórico de citas + notas del terapeuta."""
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    if not id:
+        return JSONResponse(status_code=400, content={"error": "missing id"})
+    cliente = db.get_cliente(id)
+    if not cliente:
+        return JSONResponse(status_code=404, content={"error": "not found"})
+    historial = [_clean_item(c) for c in db.get_historial_cliente(id)]
+    notas = [_clean_item(n) for n in db.get_notas_cliente(id)]
+    return {"cliente": _clean_item(cliente), "historial": historial, "notas": notas}
+
+
+@app.post("/admin/cliente/nota")
+async def admin_agregar_nota(request: Request):
+    """Agrega una nota del terapeuta a la ficha de un paciente (dato clínico).
+
+    Requiere auth admin; sanitiza y limita el texto; nunca lo loguea.
+    """
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return JSONResponse(status_code=400, content={"error": "invalid json"})
+    cliente_id = body.get("cliente_id") if isinstance(body, dict) else None
+    texto = body.get("texto") if isinstance(body, dict) else None
+    if not isinstance(cliente_id, str) or not isinstance(texto, str):
+        return JSONResponse(status_code=400, content={"error": "missing fields"})
+    texto = sanitize_text(texto)
+    if not texto or len(texto) > 2000:
+        return JSONResponse(status_code=400, content={"error": "invalid note text"})
+    if not db.get_cliente(cliente_id):
+        return JSONResponse(status_code=404, content={"error": "client not found"})
+    nota = db.agregar_nota(cliente_id, texto)
+    return {"status": "ok", "nota": {"texto": nota["texto"], "created_at": nota["created_at"]}}
+
+
 @app.get("/admin/panel")
 async def admin_panel():
     """Panel admin — login shell, sin datos de citas embebidos.
@@ -311,6 +375,43 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 .detail-msg{font:500 .85rem var(--font-ui);padding:10px;border-radius:var(--r-sm);text-align:center;color:var(--ink-2)}
 .detail-msg.ok{background:var(--accent-tint);color:var(--accent-strong)}
 .detail-msg.err{background:var(--clay-tint);color:var(--clay-ink)}
+
+/* fichas de pacientes */
+.fichas-search{margin-bottom:14px}
+.fichas-search input{width:100%;padding:10px 12px;border:1px solid var(--line-2);border-radius:var(--r-sm);font:400 .95rem var(--font-ui);color:var(--ink);background:var(--surface)}
+.fichas-search input:focus-visible{outline:2px solid var(--focus);outline-offset:1px;border-color:var(--accent)}
+.ficha-list{list-style:none;display:flex;flex-direction:column;gap:6px}
+.ficha-row{appearance:none;border:1px solid var(--line);background:var(--surface);width:100%;display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:var(--r-md);cursor:pointer;text-align:left;transition:border-color .15s var(--ease),background .15s var(--ease)}
+.ficha-row:hover{border-color:var(--accent);background:var(--accent-tint)}
+.ficha-avatar{flex:none;width:38px;height:38px;border-radius:50%;background:var(--accent-tint-2);color:var(--accent-strong);display:flex;align-items:center;justify-content:center;font:600 .85rem var(--font-ui)}
+.ficha-avatar.lg{width:52px;height:52px;font-size:1.1rem}
+.ficha-row-text{display:flex;flex-direction:column;min-width:0;flex:1}
+.ficha-name{font:600 .95rem var(--font-ui);color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ficha-sub{font:500 .8rem var(--font-ui);color:var(--ink-3)}
+.ficha-chev{color:var(--ink-3);font-size:1.3rem;flex:none}
+.ficha-back{align-self:flex-start;width:auto;margin-bottom:16px;padding:8px 14px}
+.ficha-card,.ficha-block{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:18px clamp(16px,3vw,24px);margin-bottom:16px}
+.ficha-hd{display:flex;align-items:center;gap:14px}
+.ficha-h-name{font:600 1.3rem var(--font-display);color:var(--ink);letter-spacing:-.01em}
+.ficha-h-sub{font:500 .85rem var(--font-ui);color:var(--ink-3);margin-top:2px}
+.ficha-empty{font:500 .9rem var(--font-ui);color:var(--ink-3)}
+.ficha-hist{list-style:none;display:flex;flex-direction:column}
+.ficha-hist li{display:flex;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
+.ficha-hist li:last-child{border-bottom:0}
+.hist-est{flex:none}
+.hist-text{display:flex;justify-content:space-between;gap:12px;flex:1;min-width:0;flex-wrap:wrap}
+.hist-serv{font:500 .9rem var(--font-ui);color:var(--ink)}
+.hist-when{font:500 .85rem var(--font-ui);color:var(--ink-3);font-variant-numeric:tabular-nums}
+.nota-form{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
+.nota-form textarea{width:100%;padding:10px 12px;border:1px solid var(--line-2);border-radius:var(--r-sm);font:400 .92rem var(--font-ui);color:var(--ink);background:var(--surface);resize:vertical;min-height:64px}
+.nota-form textarea:focus-visible{outline:2px solid var(--focus);outline-offset:1px;border-color:var(--accent)}
+.btn-accent{appearance:none;border:0;background:var(--accent);color:#fff;font:600 .9rem var(--font-ui);padding:10px 16px;border-radius:var(--r-sm);cursor:pointer;align-self:flex-start;transition:background .15s var(--ease)}
+.btn-accent:hover{background:var(--accent-strong)}
+.btn-accent:disabled{opacity:.6;cursor:default}
+.notas{list-style:none;display:flex;flex-direction:column;gap:8px}
+.nota{background:var(--bg);border:1px solid var(--line);border-radius:var(--r-sm);padding:11px 13px}
+.nota-txt{font:400 .92rem/1.5 var(--font-ui);color:var(--ink);white-space:pre-wrap;word-break:break-word}
+.nota-fecha{display:block;font:500 .76rem var(--font-ui);color:var(--ink-3);margin-top:6px}
 
 /* segmented control */
 .seg{display:inline-flex;background:var(--surface-sunk);border:1px solid var(--line);border-radius:999px;padding:3px;gap:2px}
@@ -484,11 +585,7 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 
   <section id="view-fichas" class="view" hidden>
     <div class="view-head"><h1 class="view-title">Fichas</h1></div>
-    <div class="empty">
-      <svg class="mark" width="40" height="40" viewBox="0 0 24 24" aria-hidden="true"><g fill="var(--accent)" fill-opacity="0.55"><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(72 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(144 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(216 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(288 12 12)"/></g><circle cx="12" cy="12" r="2.3" fill="var(--accent-strong)"/></svg>
-      <p class="empty-title">Fichas de pacientes</p>
-      <p class="empty-sub">Acá vas a poder ver la información de cada paciente, su histórico de citas y tus notas. Disponible muy pronto.</p>
-    </div>
+    <div id="fichas-body"></div>
   </section>
 </main>
 
@@ -545,7 +642,7 @@ function switchView(view){
   });
   var labels={agenda:"Agenda",reporte:"Reporte",fichas:"Fichas"};
   var tv=$("topbar-view");if(tv){tv.textContent=labels[view]||""}
-  if(view==="agenda"){renderAgenda()}else if(view==="reporte"){loadReporte()}
+  if(view==="agenda"){renderAgenda()}else if(view==="reporte"){loadReporte()}else if(view==="fichas"){loadFichas()}
 }
 
 /* navegación (menú hamburguesa) */
@@ -587,6 +684,81 @@ async function doCancel(){
 function closeDetail(){var b=$("detail-backdrop"),p=$("detail-panel");if(b)b.hidden=true;if(p)p.hidden=true;window._detailCita=null}
 
 document.addEventListener("keydown",function(e){if(e.key!=="Escape"){return}if(!$("detail-panel").hidden){closeDetail()}else if(!$("nav-drawer").hidden){closeNav()}});
+
+/* fichas de pacientes */
+function iniciales(n){n=(n||"").trim();if(!n){return "—"}var p=n.split(/\\s+/);return ((p[0].charAt(0)||"")+(p.length>1?p[p.length-1].charAt(0):"")).toUpperCase()}
+function loadFichas(){
+  $("fichas-body").innerHTML="<div class='fichas-search'><input id='fichas-q' type='search' placeholder='Buscar paciente…' autocomplete='off' oninput='filterFichas()'></div><div id='fichas-list'></div>";
+  $("fichas-list").innerHTML=skeleton();
+  fetchClientes();
+}
+async function fetchClientes(){
+  var r;
+  try{r=await fetch(base()+"/admin/clientes",{headers:{"Authorization":"Bearer "+token}})}
+  catch(e){$("fichas-list").innerHTML="<p class='rep-error'>No se pudo cargar.</p>";return}
+  if(r.status===401||r.status===403){onAuthLost();return}
+  if(!r.ok){$("fichas-list").innerHTML="<p class='rep-error'>No se pudo cargar.</p>";return}
+  var data=await r.json();
+  window._clientes=(data.clientes||[]).map(function(c,i){c._id=i;return c});
+  renderClientesList(window._clientes);
+}
+function filterFichas(){
+  var q=($("fichas-q").value||"").toLowerCase();
+  renderClientesList((window._clientes||[]).filter(function(c){return (c.nombre||"").toLowerCase().indexOf(q)>=0||(c.canal_user_id||"").toLowerCase().indexOf(q)>=0}));
+}
+function renderClientesList(list){
+  var el=$("fichas-list");if(!el){return}
+  if(!list.length){el.innerHTML="<div class='empty'><p class='empty-title'>Sin pacientes</p><p class='empty-sub'>Cuando alguien agende por el bot, va a aparecer acá.</p></div>";return}
+  var h="<ul class='ficha-list'>";
+  list.forEach(function(c){
+    var sub=c.canal==="telegram"?"Telegram @"+c.canal_user_id:c.canal==="whatsapp"?"WhatsApp +"+c.canal_user_id:(c.canal_user_id||"");
+    h+="<li><button class='ficha-row' onclick='openFicha("+c._id+")'><span class='ficha-avatar'>"+esc(iniciales(c.nombre))+"</span><span class='ficha-row-text'><span class='ficha-name'>"+esc(c.nombre||"Sin nombre")+"</span><span class='ficha-sub'>"+esc(sub)+"</span></span><span class='ficha-chev'>›</span></button></li>";
+  });
+  el.innerHTML=h+"</ul>";
+}
+function openFicha(idx){var c=(window._clientes||{})[idx];if(c){fetchFicha(c.id)}}
+async function fetchFicha(clienteId){
+  $("fichas-body").innerHTML="<button class='btn-ghost ficha-back' onclick='loadFichas()'>‹ Volver a la lista</button>"+skeleton();
+  var r;
+  try{r=await fetch(base()+"/admin/cliente?id="+encodeURIComponent(clienteId),{headers:{"Authorization":"Bearer "+token}})}
+  catch(e){return}
+  if(r.status===401||r.status===403){onAuthLost();return}
+  if(!r.ok){$("fichas-body").innerHTML="<button class='btn-ghost ficha-back' onclick='loadFichas()'>‹ Volver a la lista</button><p class='rep-error'>No se pudo cargar la ficha.</p>";return}
+  renderFicha(await r.json());
+}
+function renderFicha(data){
+  var c=data.cliente||{};var hist=data.historial||[];var notas=data.notas||[];
+  window._fichaId=c.id;
+  var sub=c.canal==="telegram"?"Telegram @"+c.canal_user_id:c.canal==="whatsapp"?"WhatsApp +"+c.canal_user_id:(c.canal_user_id||"");
+  var estIcon={confirmada:"✅",cancelada:"❌",completada:"✔️"};
+  var h="<button class='btn-ghost ficha-back' onclick='loadFichas()'>‹ Volver a la lista</button>";
+  h+="<div class='ficha-card'><div class='ficha-hd'><span class='ficha-avatar lg'>"+esc(iniciales(c.nombre))+"</span><div><div class='ficha-h-name'>"+esc(c.nombre||"Sin nombre")+"</div><div class='ficha-h-sub'>"+esc(sub)+"</div></div></div></div>";
+  h+="<section class='ficha-block'><h2 class='block-title'>Historial de citas</h2>";
+  if(!hist.length){h+="<p class='ficha-empty'>Sin citas registradas.</p>"}
+  else{h+="<ul class='ficha-hist'>";hist.forEach(function(a){h+="<li><span class='hist-est'>"+(estIcon[a.estado]||"")+"</span><span class='hist-text'><span class='hist-serv'>"+esc(a.servicio_nombre||"Consulta")+"</span><span class='hist-when'>"+esc(a.fecha)+" · "+esc(a.hora)+"</span></span></li>"});h+="</ul>"}
+  h+="</section>";
+  h+="<section class='ficha-block'><h2 class='block-title'>Notas</h2>";
+  h+="<div class='nota-form'><textarea id='nota-texto' rows='3' maxlength='2000' placeholder='Escribí una nota sobre el paciente…'></textarea><button class='btn-accent' id='nota-btn' onclick='addNota()'>Agregar nota</button></div>";
+  h+="<div id='notas-list'>"+notasHtml(notas)+"</div></section>";
+  $("fichas-body").innerHTML=h;
+}
+function notasHtml(notas){
+  if(!notas.length){return "<p class='ficha-empty'>Todavía no hay notas.</p>"}
+  var h="<ul class='notas'>";
+  notas.forEach(function(n){h+="<li class='nota'><p class='nota-txt'>"+esc(n.texto)+"</p><span class='nota-fecha'>"+esc((n.created_at||"").slice(0,10))+"</span></li>"});
+  return h+"</ul>";
+}
+async function addNota(){
+  var ta=$("nota-texto");if(!ta){return}
+  var texto=(ta.value||"").trim();if(!texto){return}
+  var btn=$("nota-btn");btn.disabled=true;btn.textContent="Guardando…";
+  var r;
+  try{r=await fetch(base()+"/admin/cliente/nota",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},body:JSON.stringify({cliente_id:window._fichaId,texto:texto})})}
+  catch(e){btn.disabled=false;btn.textContent="Agregar nota";return}
+  if(r.status===401||r.status===403){onAuthLost();return}
+  if(r.ok){fetchFicha(window._fichaId)}
+  else{btn.disabled=false;btn.textContent="Agregar nota"}
+}
 function semana(dir){offset+=dir;renderAgenda()}
 
 /* agenda */
