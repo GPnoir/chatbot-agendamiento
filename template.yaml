@@ -193,6 +193,11 @@ Resources:
           Properties:
             Path: /admin/login
             Method: post
+        AdminCancelarCita:
+          Type: Api
+          Properties:
+            Path: /admin/cita/cancelar
+            Method: post
 
   # ── Reminder Lambda ────────────────────────────────────────────────
   ReminderFunction:

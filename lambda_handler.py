@@ -163,6 +163,10 @@ async def admin_agenda(
         cli = clientes_cache.get(cid, {})
         item = {k: (int(v) if isinstance(v, Decimal) else v) for k, v in c.items()
                 if k not in ("PK", "SK", "GSI1PK", "GSI1SK")}
+        # Claves para referenciar la cita desde el panel (cancelar). El endpoint
+        # solo es alcanzable con auth admin; valida que la PK sea una cita.
+        item["pk"] = c.get("PK")
+        item["sk"] = c.get("SK")
         item["cliente_nombre"] = cli.get("nombre", "")
         item["cliente_canal"] = cli.get("canal", "")
         item["cliente_contacto"] = cli.get("canal_user_id", "")
@@ -188,6 +192,34 @@ async def admin_reporte(request: Request, desde: str = None, hasta: str = None):
         return JSONResponse(status_code=400, content={"error": "invalid date format, use YYYY-MM-DD"})
 
     return db.resumen_citas_rango(desde_v.isoformat(), hasta_v.isoformat())
+
+
+@app.post("/admin/cita/cancelar")
+async def admin_cancelar_cita(request: Request):
+    """Cancela una cita desde el panel. Body: {pk, sk}.
+
+    Acción destructiva: requiere auth admin y valida que la clave corresponda a
+    una cita (PK APPOINTMENT# / SK DATE#) para no poder mutar otros registros.
+    """
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return JSONResponse(status_code=400, content={"error": "invalid json"})
+    pk = body.get("pk") if isinstance(body, dict) else None
+    sk = body.get("sk") if isinstance(body, dict) else None
+    if (not isinstance(pk, str) or not isinstance(sk, str)
+            or not pk.startswith("APPOINTMENT#") or not sk.startswith("DATE#")):
+        return JSONResponse(status_code=400, content={"error": "invalid appointment id"})
+
+    table = db.get_table()
+    existing = table.get_item(Key={"PK": pk, "SK": sk}).get("Item")
+    if not existing:
+        return JSONResponse(status_code=404, content={"error": "not found"})
+
+    db.cancelar_cita(pk, sk)
+    return {"status": "ok"}
 
 
 @app.get("/admin/panel")
@@ -239,6 +271,46 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 .brand-name{font:600 1rem var(--font-display);color:var(--ink);letter-spacing:-.01em}
 .brand-sub{font:500 .72rem var(--font-ui);color:var(--ink-3)}
 .mark{flex:none;display:block}
+.topbar-view{margin-left:auto;font:600 .9rem var(--font-ui);color:var(--ink-3)}
+
+/* menú hamburguesa + drawer */
+.hamburger{appearance:none;border:1px solid var(--line);background:var(--surface);border-radius:var(--r-sm);width:38px;height:38px;display:inline-flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:pointer;flex:none;transition:border-color .15s var(--ease)}
+.hamburger span{display:block;width:18px;height:2px;background:var(--ink-2);border-radius:2px;transition:background .15s var(--ease)}
+.hamburger:hover{border-color:var(--accent)}
+.hamburger:hover span{background:var(--accent-strong)}
+.nav-backdrop{position:fixed;inset:0;background:color-mix(in oklch,var(--ink) 40%,transparent);z-index:90;animation:fade .15s var(--ease)}
+.nav-drawer{position:fixed;top:0;left:0;height:100%;width:min(82vw,280px);background:var(--surface);border-right:1px solid var(--line);box-shadow:var(--shadow);z-index:95;padding:18px;display:flex;flex-direction:column;gap:4px;animation:slidein .22s var(--ease)}
+@keyframes slidein{from{transform:translateX(-100%)}to{transform:translateX(0)}}
+.nav-head{display:flex;align-items:center;gap:8px;padding:4px 8px 16px;border-bottom:1px solid var(--line);margin-bottom:8px}
+.nav-title{font:600 .95rem var(--font-display);color:var(--ink);letter-spacing:-.01em}
+.nav-list{list-style:none;display:flex;flex-direction:column;gap:2px}
+.nav-item{appearance:none;border:0;background:transparent;width:100%;text-align:left;font:500 .95rem var(--font-ui);color:var(--ink);padding:11px 12px;border-radius:var(--r-sm);cursor:pointer;transition:background .15s var(--ease),color .15s var(--ease)}
+.nav-item:hover{background:var(--surface-sunk)}
+.nav-item.is-active{background:var(--accent-tint);color:var(--accent-strong)}
+.nav-logout{margin-top:auto;color:var(--clay-ink)}
+.nav-logout:hover{background:var(--clay-tint)}
+
+/* panel de detalle de cita (derecha) */
+.detail-backdrop{position:fixed;inset:0;background:color-mix(in oklch,var(--ink) 35%,transparent);z-index:96;animation:fade .15s var(--ease)}
+.detail-panel{position:fixed;top:0;right:0;height:100%;width:min(90vw,360px);background:var(--surface);border-left:1px solid var(--line);box-shadow:var(--shadow);z-index:97;padding:20px clamp(16px,3vw,24px);display:flex;flex-direction:column;gap:16px;overflow-y:auto;animation:slideinR .22s var(--ease)}
+@keyframes slideinR{from{transform:translateX(100%)}to{transform:translateX(0)}}
+.detail-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.detail-title{font:600 1.2rem var(--font-display);color:var(--ink);letter-spacing:-.01em}
+.detail-close{appearance:none;border:0;background:transparent;font-size:1.6rem;line-height:1;color:var(--ink-3);cursor:pointer;padding:2px 6px;border-radius:var(--r-sm)}
+.detail-close:hover{color:var(--ink)}
+.detail-fields{display:flex;flex-direction:column;border-top:1px solid var(--line)}
+.detail-fields>div{display:flex;justify-content:space-between;gap:16px;padding:11px 0;border-bottom:1px solid var(--line)}
+.detail-fields dt{font:500 .82rem var(--font-ui);color:var(--ink-3)}
+.detail-fields dd{font:500 .9rem var(--font-ui);color:var(--ink);text-align:right}
+.detail-actions{margin-top:auto;display:flex;flex-direction:column;gap:8px}
+.confirm-row{display:flex;gap:8px}.confirm-row button{flex:1}
+.btn-danger{appearance:none;border:1px solid color-mix(in oklch,var(--clay) 40%,transparent);background:var(--clay-tint);color:var(--clay-ink);font:600 .9rem var(--font-ui);padding:11px;border-radius:var(--r-sm);cursor:pointer;transition:background .15s var(--ease)}
+.btn-danger:hover{background:color-mix(in oklch,var(--clay-tint) 65%,var(--clay))}
+.btn-ghost{appearance:none;border:1px solid var(--line);background:var(--surface);color:var(--ink-2);font:600 .9rem var(--font-ui);padding:11px;border-radius:var(--r-sm);cursor:pointer;transition:border-color .15s var(--ease),color .15s var(--ease)}
+.btn-ghost:hover{border-color:var(--accent);color:var(--accent-strong)}
+.detail-msg{font:500 .85rem var(--font-ui);padding:10px;border-radius:var(--r-sm);text-align:center;color:var(--ink-2)}
+.detail-msg.ok{background:var(--accent-tint);color:var(--accent-strong)}
+.detail-msg.err{background:var(--clay-tint);color:var(--clay-ink)}
 
 /* segmented control */
 .seg{display:inline-flex;background:var(--surface-sunk);border:1px solid var(--line);border-radius:999px;padding:3px;gap:2px}
@@ -269,7 +341,7 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 .cal-cell.is-today{background:color-mix(in oklch,var(--accent-tint) 45%,var(--surface))}
 .cal-cell.is-closed{background:var(--surface-sunk);align-items:center;justify-content:center}
 .cal-cell.is-closed span{color:var(--ink-3);opacity:.45;font-size:.8rem}
-.cita{background:var(--accent-tint);border:1px solid color-mix(in oklch,var(--accent) 16%,transparent);border-radius:var(--r-sm);padding:5px 7px;display:flex;gap:6px;transition:background .15s var(--ease),box-shadow .15s var(--ease)}
+.cita{background:var(--accent-tint);border:1px solid color-mix(in oklch,var(--accent) 16%,transparent);border-radius:var(--r-sm);padding:5px 7px;display:flex;gap:6px;cursor:pointer;transition:background .15s var(--ease),box-shadow .15s var(--ease)}
 .cita:hover{background:var(--accent-tint-2);box-shadow:var(--shadow-sm)}
 .cita-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-top:5px}
 .cita-body{min-width:0}
@@ -352,15 +424,37 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 </div>
 
 <header class="topbar" id="topbar" hidden>
+  <button class="hamburger" id="nav-toggle" aria-label="Abrir menú" aria-expanded="false" aria-controls="nav-drawer" onclick="toggleNav()"><span></span><span></span><span></span></button>
   <div class="brand">
     <svg class="mark" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><g fill="var(--accent)" fill-opacity="0.55"><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(72 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(144 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(216 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(288 12 12)"/></g><circle cx="12" cy="12" r="2.3" fill="var(--accent-strong)"/></svg>
     <div class="brand-text"><span class="brand-name">Centro de Flores de Bach</span><span class="brand-sub">Terapia floral · Nelly Pailacura</span></div>
   </div>
-  <div class="seg" role="tablist" aria-label="Vista">
-    <button class="seg-btn is-active" id="tab-agenda" role="tab" aria-selected="true" onclick="switchView('agenda')">Agenda</button>
-    <button class="seg-btn" id="tab-reporte" role="tab" aria-selected="false" onclick="switchView('reporte')">Reporte</button>
-  </div>
+  <span class="topbar-view" id="topbar-view">Agenda</span>
 </header>
+
+<div class="nav-backdrop" id="nav-backdrop" hidden onclick="closeNav()"></div>
+<nav class="nav-drawer" id="nav-drawer" aria-label="Navegación" hidden>
+  <div class="nav-head">
+    <svg class="mark" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><g fill="var(--accent)" fill-opacity="0.55"><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(72 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(144 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(216 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(288 12 12)"/></g><circle cx="12" cy="12" r="2.3" fill="var(--accent-strong)"/></svg>
+    <span class="nav-title">Centro de Flores de Bach</span>
+  </div>
+  <ul class="nav-list">
+    <li><button class="nav-item is-active" id="nav-agenda" aria-current="page" onclick="navTo('agenda')">Agenda</button></li>
+    <li><button class="nav-item" id="nav-reporte" onclick="navTo('reporte')">Reporte</button></li>
+    <li><button class="nav-item" id="nav-fichas" onclick="navTo('fichas')">Fichas</button></li>
+  </ul>
+  <button class="nav-item nav-logout" id="nav-logout" onclick="closeNav();logout()">Cerrar sesión</button>
+</nav>
+
+<div class="detail-backdrop" id="detail-backdrop" hidden onclick="closeDetail()"></div>
+<aside class="detail-panel" id="detail-panel" aria-label="Detalle de la cita" hidden>
+  <div class="detail-head">
+    <h2 class="detail-title">Detalle de la cita</h2>
+    <button class="detail-close" aria-label="Cerrar" onclick="closeDetail()">&times;</button>
+  </div>
+  <dl class="detail-fields" id="detail-fields"></dl>
+  <div class="detail-actions" id="detail-actions"></div>
+</aside>
 
 <main class="wrap" id="app" hidden>
   <section id="view-agenda" class="view">
@@ -387,6 +481,15 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
     <p class="rep-rango" id="rep-rango"></p>
     <div id="rep-body"></div>
   </section>
+
+  <section id="view-fichas" class="view" hidden>
+    <div class="view-head"><h1 class="view-title">Fichas</h1></div>
+    <div class="empty">
+      <svg class="mark" width="40" height="40" viewBox="0 0 24 24" aria-hidden="true"><g fill="var(--accent)" fill-opacity="0.55"><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(72 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(144 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(216 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(288 12 12)"/></g><circle cx="12" cy="12" r="2.3" fill="var(--accent-strong)"/></svg>
+      <p class="empty-title">Fichas de pacientes</p>
+      <p class="empty-sub">Acá vas a poder ver la información de cada paciente, su histórico de citas y tus notas. Disponible muy pronto.</p>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -408,7 +511,7 @@ function doLogin(){var u=$("login-user").value.trim(),p=$("login-pass").value;if
 $("login-user").addEventListener("keydown",function(e){if(e.key==="Enter")doLogin()});
 $("login-pass").addEventListener("keydown",function(e){if(e.key==="Enter")doLogin()});
 function showApp(){$("login-overlay").style.display="none";$("topbar").hidden=false;$("app").hidden=false;$("cal").style.display="grid"}
-function showLogin(err){$("login-overlay").style.display="flex";$("topbar").hidden=true;$("app").hidden=true;$("login-error").style.display=err?"block":"none";var p=$("login-pass");if(p)p.value=""}
+function showLogin(err){closeNav();closeDetail();$("login-overlay").style.display="flex";$("topbar").hidden=true;$("app").hidden=true;$("login-error").style.display=err?"block":"none";var p=$("login-pass");if(p)p.value=""}
 function onAuthLost(){token="";sessionStorage.removeItem("admin_session");showLogin(true)}
 function logout(){token="";sessionStorage.removeItem("admin_session");showLogin(false)}
 
@@ -435,12 +538,55 @@ restoreSession();
 
 /* vistas */
 function switchView(view){
-  var ag=view==="agenda";
-  $("view-agenda").hidden=!ag;$("view-reporte").hidden=ag;
-  $("tab-agenda").classList.toggle("is-active",ag);$("tab-reporte").classList.toggle("is-active",!ag);
-  $("tab-agenda").setAttribute("aria-selected",ag);$("tab-reporte").setAttribute("aria-selected",!ag);
-  if(ag){renderAgenda()}else{loadReporte()}
+  closeDetail();
+  ["agenda","reporte","fichas"].forEach(function(v){
+    var s=$("view-"+v);if(s){s.hidden=(v!==view)}
+    var n=$("nav-"+v);if(n){n.classList.toggle("is-active",v===view);if(v===view){n.setAttribute("aria-current","page")}else{n.removeAttribute("aria-current")}}
+  });
+  var labels={agenda:"Agenda",reporte:"Reporte",fichas:"Fichas"};
+  var tv=$("topbar-view");if(tv){tv.textContent=labels[view]||""}
+  if(view==="agenda"){renderAgenda()}else if(view==="reporte"){loadReporte()}
 }
+
+/* navegación (menú hamburguesa) */
+function openNav(){$("nav-backdrop").hidden=false;$("nav-drawer").hidden=false;$("nav-toggle").setAttribute("aria-expanded","true")}
+function closeNav(){var b=$("nav-backdrop"),d=$("nav-drawer"),t=$("nav-toggle");if(b)b.hidden=true;if(d)d.hidden=true;if(t)t.setAttribute("aria-expanded","false")}
+function toggleNav(){if($("nav-drawer").hidden){openNav()}else{closeNav()}}
+function navTo(view){closeNav();switchView(view)}
+
+/* panel de detalle de cita (agenda) */
+function openDetail(id){
+  var c=(window._citas||{})[id];if(!c){return}
+  window._detailCita=c;
+  var dias=["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+  var d=new Date(c.fecha+"T00:00:00");
+  var contacto=c.cliente_canal==="telegram"?"Telegram @"+c.cliente_contacto:c.cliente_canal==="whatsapp"?"WhatsApp +"+c.cliente_contacto:(c.cliente_contacto||"—");
+  function row(k,v){return "<div><dt>"+esc(k)+"</dt><dd>"+esc(v)+"</dd></div>"}
+  $("detail-fields").innerHTML=
+    row("Paciente",c.cliente_nombre||"Sin nombre")+
+    row("Servicio",(c.servicio_nombre||"Consulta")+" · "+(c.servicio_duracion||60)+" min")+
+    row("Profesional",c.profesional_nombre||"—")+
+    row("Fecha",dias[d.getDay()]+" "+fmtCorto(d))+
+    row("Hora",c.hora)+
+    row("Contacto",contacto);
+  detailActions();
+  $("detail-backdrop").hidden=false;$("detail-panel").hidden=false;
+}
+function detailActions(){$("detail-actions").innerHTML="<button class='btn-danger' onclick='askCancel()'>Cancelar cita</button>"}
+function askCancel(){$("detail-actions").innerHTML="<p class='detail-msg'>¿Seguro que querés cancelar esta cita?</p><div class='confirm-row'><button class='btn-danger' onclick='doCancel()'>Sí, cancelar</button><button class='btn-ghost' onclick='detailActions()'>No</button></div>"}
+async function doCancel(){
+  var c=window._detailCita;if(!c){return}
+  $("detail-actions").innerHTML="<p class='detail-msg'>Cancelando…</p>";
+  var r;
+  try{r=await fetch(base()+"/admin/cita/cancelar",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},body:JSON.stringify({pk:c.pk,sk:c.sk})})}
+  catch(e){$("detail-actions").innerHTML="<p class='detail-msg err'>No se pudo cancelar. Reintentá.</p><button class='btn-ghost' onclick='detailActions()'>Volver</button>";return}
+  if(r.status===401||r.status===403){onAuthLost();return}
+  if(r.ok){$("detail-fields").innerHTML="";$("detail-actions").innerHTML="<p class='detail-msg ok'>Cita cancelada.</p><button class='btn-ghost' onclick='closeDetail()'>Cerrar</button>";renderAgenda()}
+  else{$("detail-actions").innerHTML="<p class='detail-msg err'>No se pudo cancelar.</p><button class='btn-ghost' onclick='detailActions()'>Volver</button>"}
+}
+function closeDetail(){var b=$("detail-backdrop"),p=$("detail-panel");if(b)b.hidden=true;if(p)p.hidden=true;window._detailCita=null}
+
+document.addEventListener("keydown",function(e){if(e.key!=="Escape"){return}if(!$("detail-panel").hidden){closeDetail()}else if(!$("nav-drawer").hidden){closeNav()}});
 function semana(dir){offset+=dir;renderAgenda()}
 
 /* agenda */
@@ -453,8 +599,9 @@ async function renderAgenda(){
   catch(e){return}
   if(r.status===401||r.status===403){onAuthLost();return}
   var data=await r.json();
+  window._citas={};
   var citasMap={};
-  (data.citas||[]).forEach(function(c){var k=c.fecha+"#"+c.hora;(citasMap[k]=citasMap[k]||[]).push(c)});
+  (data.citas||[]).forEach(function(c,i){c._id=i;window._citas[i]=c;var k=c.fecha+"#"+c.hora;(citasMap[k]=citasMap[k]||[]).push(c)});
   var minH=9,maxH=18;
   var html="<div class='cal-corner'></div>";
   dias.forEach(function(d){
@@ -475,7 +622,7 @@ async function renderAgenda(){
         citas.forEach(function(c){
           var contacto=c.cliente_canal==="telegram"?"Telegram @"+c.cliente_contacto:c.cliente_canal==="whatsapp"?"WhatsApp +"+c.cliente_contacto:(c.cliente_contacto||"");
           var cancel=c.estado==="cancelada"?" cita-cancel":"";
-          html+="<div class='cita"+cancel+"'><span class='cita-dot'></span><div class='cita-body'><div class='nombre'>"+esc(c.cliente_nombre||"Sin nombre")+"</div><div class='servicio'>"+esc(c.servicio_nombre||"Consulta")+" · "+esc(String(c.servicio_duracion||60))+" min</div><div class='contacto'>"+esc(contacto)+"</div></div></div>";
+          html+="<div class='cita"+cancel+"' onclick='openDetail("+c._id+")'><span class='cita-dot'></span><div class='cita-body'><div class='nombre'>"+esc(c.cliente_nombre||"Sin nombre")+"</div><div class='servicio'>"+esc(c.servicio_nombre||"Consulta")+" · "+esc(String(c.servicio_duracion||60))+" min</div><div class='contacto'>"+esc(contacto)+"</div></div></div>";
         });
         html+="</div>";
       });
