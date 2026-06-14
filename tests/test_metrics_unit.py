@@ -232,3 +232,16 @@ class TestAdminPanelDashboard:
         import pathlib
         template = pathlib.Path(__file__).resolve().parents[1] / "template.yaml"
         assert "Path: /admin/login" in template.read_text()
+
+    def test_panel_menu_hamburguesa(self, admin_client):
+        """El panel trae menú hamburguesa con Agenda/Reporte/Fichas/Logout."""
+        html = admin_client.get("/admin/panel").text
+        assert 'id="nav-toggle"' in html        # botón hamburguesa
+        assert 'id="nav-drawer"' in html        # drawer de navegación
+        assert 'id="nav-agenda"' in html
+        assert 'id="nav-reporte"' in html
+        assert 'id="nav-fichas"' in html
+        assert 'id="view-fichas"' in html       # vista Fichas (placeholder)
+        assert "Cerrar sesión" in html          # logout
+        # El control segmentado de la cabecera fue reemplazado por el menú.
+        assert 'id="tab-agenda"' not in html
