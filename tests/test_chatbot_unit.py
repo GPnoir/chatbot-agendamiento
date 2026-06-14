@@ -245,8 +245,13 @@ class TestModifyFlow:
         assert "Horas disponibles" in resp
         assert chatbot._get_session(TEST_USER)["state"] == chatbot.MODIFY_TIME
 
+        # Seleccionar la hora ahora pide confirmación (no aplica directo).
         resp = chatbot.handle_message("test", TEST_USER, "1")
-        assert "modificada" in resp or "✅" in resp
+        assert "Reagendar" in resp or "Confirma" in resp
+        assert chatbot._get_session(TEST_USER)["state"] == chatbot.MODIFY_CONFIRM
+
+        resp = chatbot.handle_message("test", TEST_USER, "si")
+        assert "reagendada" in resp.lower() or "✅" in resp
         assert chatbot._get_session(TEST_USER)["state"] == chatbot.IDLE
 
     def test_modificar_actualiza_bd(self, fresh_db):
@@ -261,6 +266,7 @@ class TestModifyFlow:
         chatbot.handle_message("test", TEST_USER, "1")
         chatbot.handle_message("test", TEST_USER, "1")
         chatbot.handle_message("test", TEST_USER, "1")
+        chatbot.handle_message("test", TEST_USER, "si")  # confirmar el reagendamiento
 
         citas_actualizadas = db_module.get_citas_cliente(cliente["id"])
         assert len(citas_actualizadas) == 1
