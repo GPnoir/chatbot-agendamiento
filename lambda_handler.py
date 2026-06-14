@@ -239,6 +239,24 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 .brand-name{font:600 1rem var(--font-display);color:var(--ink);letter-spacing:-.01em}
 .brand-sub{font:500 .72rem var(--font-ui);color:var(--ink-3)}
 .mark{flex:none;display:block}
+.topbar-view{margin-left:auto;font:600 .9rem var(--font-ui);color:var(--ink-3)}
+
+/* menú hamburguesa + drawer */
+.hamburger{appearance:none;border:1px solid var(--line);background:var(--surface);border-radius:var(--r-sm);width:38px;height:38px;display:inline-flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:pointer;flex:none;transition:border-color .15s var(--ease)}
+.hamburger span{display:block;width:18px;height:2px;background:var(--ink-2);border-radius:2px;transition:background .15s var(--ease)}
+.hamburger:hover{border-color:var(--accent)}
+.hamburger:hover span{background:var(--accent-strong)}
+.nav-backdrop{position:fixed;inset:0;background:color-mix(in oklch,var(--ink) 40%,transparent);z-index:90;animation:fade .15s var(--ease)}
+.nav-drawer{position:fixed;top:0;left:0;height:100%;width:min(82vw,280px);background:var(--surface);border-right:1px solid var(--line);box-shadow:var(--shadow);z-index:95;padding:18px;display:flex;flex-direction:column;gap:4px;animation:slidein .22s var(--ease)}
+@keyframes slidein{from{transform:translateX(-100%)}to{transform:translateX(0)}}
+.nav-head{display:flex;align-items:center;gap:8px;padding:4px 8px 16px;border-bottom:1px solid var(--line);margin-bottom:8px}
+.nav-title{font:600 .95rem var(--font-display);color:var(--ink);letter-spacing:-.01em}
+.nav-list{list-style:none;display:flex;flex-direction:column;gap:2px}
+.nav-item{appearance:none;border:0;background:transparent;width:100%;text-align:left;font:500 .95rem var(--font-ui);color:var(--ink);padding:11px 12px;border-radius:var(--r-sm);cursor:pointer;transition:background .15s var(--ease),color .15s var(--ease)}
+.nav-item:hover{background:var(--surface-sunk)}
+.nav-item.is-active{background:var(--accent-tint);color:var(--accent-strong)}
+.nav-logout{margin-top:auto;color:var(--clay-ink)}
+.nav-logout:hover{background:var(--clay-tint)}
 
 /* segmented control */
 .seg{display:inline-flex;background:var(--surface-sunk);border:1px solid var(--line);border-radius:999px;padding:3px;gap:2px}
@@ -352,15 +370,27 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 </div>
 
 <header class="topbar" id="topbar" hidden>
+  <button class="hamburger" id="nav-toggle" aria-label="Abrir menú" aria-expanded="false" aria-controls="nav-drawer" onclick="toggleNav()"><span></span><span></span><span></span></button>
   <div class="brand">
     <svg class="mark" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><g fill="var(--accent)" fill-opacity="0.55"><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(72 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(144 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(216 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(288 12 12)"/></g><circle cx="12" cy="12" r="2.3" fill="var(--accent-strong)"/></svg>
     <div class="brand-text"><span class="brand-name">Centro de Flores de Bach</span><span class="brand-sub">Terapia floral · Nelly Pailacura</span></div>
   </div>
-  <div class="seg" role="tablist" aria-label="Vista">
-    <button class="seg-btn is-active" id="tab-agenda" role="tab" aria-selected="true" onclick="switchView('agenda')">Agenda</button>
-    <button class="seg-btn" id="tab-reporte" role="tab" aria-selected="false" onclick="switchView('reporte')">Reporte</button>
-  </div>
+  <span class="topbar-view" id="topbar-view">Agenda</span>
 </header>
+
+<div class="nav-backdrop" id="nav-backdrop" hidden onclick="closeNav()"></div>
+<nav class="nav-drawer" id="nav-drawer" aria-label="Navegación" hidden>
+  <div class="nav-head">
+    <svg class="mark" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><g fill="var(--accent)" fill-opacity="0.55"><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(72 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(144 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(216 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(288 12 12)"/></g><circle cx="12" cy="12" r="2.3" fill="var(--accent-strong)"/></svg>
+    <span class="nav-title">Centro de Flores de Bach</span>
+  </div>
+  <ul class="nav-list">
+    <li><button class="nav-item is-active" id="nav-agenda" aria-current="page" onclick="navTo('agenda')">Agenda</button></li>
+    <li><button class="nav-item" id="nav-reporte" onclick="navTo('reporte')">Reporte</button></li>
+    <li><button class="nav-item" id="nav-fichas" onclick="navTo('fichas')">Fichas</button></li>
+  </ul>
+  <button class="nav-item nav-logout" id="nav-logout" onclick="closeNav();logout()">Cerrar sesión</button>
+</nav>
 
 <main class="wrap" id="app" hidden>
   <section id="view-agenda" class="view">
@@ -387,6 +417,15 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
     <p class="rep-rango" id="rep-rango"></p>
     <div id="rep-body"></div>
   </section>
+
+  <section id="view-fichas" class="view" hidden>
+    <div class="view-head"><h1 class="view-title">Fichas</h1></div>
+    <div class="empty">
+      <svg class="mark" width="40" height="40" viewBox="0 0 24 24" aria-hidden="true"><g fill="var(--accent)" fill-opacity="0.55"><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(72 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(144 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(216 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(288 12 12)"/></g><circle cx="12" cy="12" r="2.3" fill="var(--accent-strong)"/></svg>
+      <p class="empty-title">Fichas de pacientes</p>
+      <p class="empty-sub">Acá vas a poder ver la información de cada paciente, su histórico de citas y tus notas. Disponible muy pronto.</p>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -408,7 +447,7 @@ function doLogin(){var u=$("login-user").value.trim(),p=$("login-pass").value;if
 $("login-user").addEventListener("keydown",function(e){if(e.key==="Enter")doLogin()});
 $("login-pass").addEventListener("keydown",function(e){if(e.key==="Enter")doLogin()});
 function showApp(){$("login-overlay").style.display="none";$("topbar").hidden=false;$("app").hidden=false;$("cal").style.display="grid"}
-function showLogin(err){$("login-overlay").style.display="flex";$("topbar").hidden=true;$("app").hidden=true;$("login-error").style.display=err?"block":"none";var p=$("login-pass");if(p)p.value=""}
+function showLogin(err){closeNav();$("login-overlay").style.display="flex";$("topbar").hidden=true;$("app").hidden=true;$("login-error").style.display=err?"block":"none";var p=$("login-pass");if(p)p.value=""}
 function onAuthLost(){token="";sessionStorage.removeItem("admin_session");showLogin(true)}
 function logout(){token="";sessionStorage.removeItem("admin_session");showLogin(false)}
 
@@ -435,12 +474,21 @@ restoreSession();
 
 /* vistas */
 function switchView(view){
-  var ag=view==="agenda";
-  $("view-agenda").hidden=!ag;$("view-reporte").hidden=ag;
-  $("tab-agenda").classList.toggle("is-active",ag);$("tab-reporte").classList.toggle("is-active",!ag);
-  $("tab-agenda").setAttribute("aria-selected",ag);$("tab-reporte").setAttribute("aria-selected",!ag);
-  if(ag){renderAgenda()}else{loadReporte()}
+  ["agenda","reporte","fichas"].forEach(function(v){
+    var s=$("view-"+v);if(s){s.hidden=(v!==view)}
+    var n=$("nav-"+v);if(n){n.classList.toggle("is-active",v===view);if(v===view){n.setAttribute("aria-current","page")}else{n.removeAttribute("aria-current")}}
+  });
+  var labels={agenda:"Agenda",reporte:"Reporte",fichas:"Fichas"};
+  var tv=$("topbar-view");if(tv){tv.textContent=labels[view]||""}
+  if(view==="agenda"){renderAgenda()}else if(view==="reporte"){loadReporte()}
 }
+
+/* navegación (menú hamburguesa) */
+function openNav(){$("nav-backdrop").hidden=false;$("nav-drawer").hidden=false;$("nav-toggle").setAttribute("aria-expanded","true")}
+function closeNav(){var b=$("nav-backdrop"),d=$("nav-drawer"),t=$("nav-toggle");if(b)b.hidden=true;if(d)d.hidden=true;if(t)t.setAttribute("aria-expanded","false")}
+function toggleNav(){if($("nav-drawer").hidden){openNav()}else{closeNav()}}
+function navTo(view){closeNav();switchView(view)}
+document.addEventListener("keydown",function(e){if(e.key==="Escape"&&!$("nav-drawer").hidden){closeNav()}});
 function semana(dir){offset+=dir;renderAgenda()}
 
 /* agenda */
