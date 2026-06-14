@@ -258,3 +258,19 @@ class TestAdminPanelDashboard:
         import pathlib
         template = pathlib.Path(__file__).resolve().parents[1] / "template.yaml"
         assert "Path: /admin/cita/cancelar" in template.read_text()
+
+    def test_panel_fichas_funcional(self, admin_client):
+        """La vista Fichas consume los endpoints de pacientes y notas."""
+        html = admin_client.get("/admin/panel").text
+        assert "loadFichas" in html            # carga la lista de pacientes
+        assert "/admin/clientes" in html
+        assert "/admin/cliente/nota" in html   # agregar nota
+        assert "addNota" in html
+
+    def test_template_rutea_fichas(self):
+        """API Gateway debe enrutar los endpoints de fichas (si no, 403 en prod)."""
+        import pathlib
+        txt = (pathlib.Path(__file__).resolve().parents[1] / "template.yaml").read_text()
+        assert "Path: /admin/clientes" in txt
+        assert "Path: /admin/cliente\n" in txt
+        assert "Path: /admin/cliente/nota" in txt

@@ -217,6 +217,44 @@ def get_historial_cliente(cliente_id: str) -> list[dict]:
     return items
 
 
+# ── Fichas de pacientes (panel admin) ─────────────────────────────────
+def get_clientes() -> list[dict]:
+    """Lista todos los clientes (pacientes), ordenados por nombre."""
+    table = get_table()
+    resp = table.query(KeyConditionExpression=Key("PK").eq("CLIENT"))
+    items = resp.get("Items", [])
+    return sorted(items, key=lambda c: (c.get("nombre") or "").lower())
+
+
+def get_cliente(cliente_id: str) -> Optional[dict]:
+    """Obtiene un cliente por su id (la SK CHAN#...)."""
+    resp = get_table().get_item(Key={"PK": "CLIENT", "SK": cliente_id})
+    return resp.get("Item")
+
+
+def agregar_nota(cliente_id: str, texto: str) -> dict:
+    """Agrega una nota del terapeuta a la ficha de un cliente."""
+    table = get_table()
+    ts = datetime.utcnow().isoformat()
+    item = {
+        "PK": f"NOTE#{cliente_id}",
+        "SK": ts,
+        "cliente_id": cliente_id,
+        "texto": texto,
+        "created_at": ts,
+    }
+    table.put_item(Item=item)
+    return item
+
+
+def get_notas_cliente(cliente_id: str) -> list[dict]:
+    """Notas de un cliente, de la más reciente a la más antigua."""
+    table = get_table()
+    resp = table.query(KeyConditionExpression=Key("PK").eq(f"NOTE#{cliente_id}"))
+    items = resp.get("Items", [])
+    return sorted(items, key=lambda n: n.get("created_at", ""), reverse=True)
+
+
 def cancelar_cita(cita_pk: str, cita_sk: str):
     table = get_table()
     # Leemos la cita primero para recuperar el event id de Google Calendar.
