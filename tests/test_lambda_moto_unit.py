@@ -193,7 +193,10 @@ def lambda_app_client():
     sent: list[dict] = []
 
     async def fake_send(chat_id, text, *args, **kwargs):
-        sent.append({"chat_id": chat_id, "text": text})
+        markup = kwargs.get("reply_markup")
+        if markup is None and args:
+            markup = args[0]
+        sent.append({"chat_id": chat_id, "text": text, "reply_markup": markup})
 
     with patch.object(lambda_handler, "_send_telegram", side_effect=fake_send):
         with TestClient(lambda_handler.app, raise_server_exceptions=True) as client:
@@ -223,14 +226,18 @@ class TestTelegramWebhookConMoto:
         )
         assert resp.status_code == 200
         assert len(sent) == 1
-        assert "1️⃣ Agendar una hora" in sent[0]["text"]
+        # Las opciones van como botones (no duplicadas como texto numerado).
+        assert "¿Qué deseas hacer?" in sent[0]["text"]
+        labels = [b["text"] for row in sent[0]["reply_markup"]["inline_keyboard"] for b in row]
+        assert "Agendar una hora" in labels
 
     def test_flujo_agendar_muestra_servicios(self, lambda_app_client):
         client, sent = lambda_app_client
         headers = {"X-Telegram-Bot-Api-Secret-Token": TELEGRAM_SECRET}
         client.post("/telegram/webhook", json=_telegram_update(333444, "menu"), headers=headers)
         client.post("/telegram/webhook", json=_telegram_update(333444, "1"), headers=headers)
-        assert "Consulta inicial" in sent[-1]["text"]
+        labels = [b["text"] for row in sent[-1]["reply_markup"]["inline_keyboard"] for b in row]
+        assert any("Consulta inicial" in lbl for lbl in labels)
 
     def test_sesion_persiste_en_dynamo(self, lambda_app_client, dynamo_mock_table):
         client, _ = lambda_app_client

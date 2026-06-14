@@ -19,6 +19,7 @@ CANCEL_CONFIRM = "CANCEL_CONFIRM"
 MODIFY_SELECT = "MODIFY_SELECT"
 MODIFY_DATE = "MODIFY_DATE"
 MODIFY_TIME = "MODIFY_TIME"
+MODIFY_CONFIRM = "MODIFY_CONFIRM"
 CONFIRM_ATTENDANCE = "CONFIRM_ATTENDANCE"
 
 
@@ -88,6 +89,8 @@ def handle_message(canal: str, canal_user_id: str, text: str) -> str:
         resp = _handle_modify_date(session, text)
     elif state == MODIFY_TIME:
         resp = _handle_modify_time(session, text)
+    elif state == MODIFY_CONFIRM:
+        resp = _handle_modify_confirm(session, canal, canal_user_id, text)
     elif state == CONFIRM_ATTENDANCE:
         resp = _handle_confirm_attendance(session, canal, canal_user_id, text)
     else:
@@ -348,12 +351,35 @@ def _handle_modify_time(session, text):
         hora = horas[idx]
     except (ValueError, IndexError):
         return MENSAJES["error"]
+    # No aplica el cambio todavía: pide confirmación por si eligió mal la hora.
+    session["data"]["nueva_hora"] = hora
+    session["state"] = MODIFY_CONFIRM
     cita = session["data"]["cita_seleccionada"]
     fecha = session["data"]["nueva_fecha"]
-    db.modificar_cita(cita["PK"], cita["SK"], fecha.isoformat(), hora)
+    nombre_dia = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"][fecha.weekday()]
+    return (
+        f"📋 Confirma el cambio:\n\n"
+        f"📌 {cita.get('servicio_nombre', '')}\n"
+        f"📅 {nombre_dia} {fecha.strftime('%d/%m/%Y')} a las {hora}\n\n"
+        f"¿Reagendar tu cita? (si/no)"
+    )
+
+
+def _handle_modify_confirm(session, canal, canal_user_id, text):
+    if text.lower() in ("si", "sí", "s", "1"):
+        cita = session["data"]["cita_seleccionada"]
+        fecha = session["data"]["nueva_fecha"]
+        hora = session["data"]["nueva_hora"]
+        db.modificar_cita(cita["PK"], cita["SK"], fecha.isoformat(), hora)
+        _notify_profesional(
+            f"🔄 Cita reagendada:\n📋 {cita.get('servicio_nombre', '')}\n🕐 {fecha.strftime('%d/%m/%Y')} a las {hora}"
+        )
+        session["state"] = IDLE
+        session["data"] = {}
+        return f"✅ Cita reagendada a {fecha.strftime('%d/%m/%Y')} a las {hora}.\n\nEscribe *menu* para volver."
     session["state"] = IDLE
     session["data"] = {}
-    return f"✅ Cita modificada a {fecha.strftime('%d/%m/%Y')} a las {hora}.\n\nEscribe *menu* para volver."
+    return "Cambio cancelado. Tu cita queda como estaba. Escribe *menu* para volver."
 
 
 def _handle_confirm_attendance(session, canal, canal_user_id, text):

@@ -29,7 +29,7 @@ from input_validation import (
     is_oversized,
 )
 from observability import get_logger, log_message_handled
-from telegram_ui import build_reply_markup
+from telegram_ui import build_message, button_label
 
 logger = get_logger(__name__)
 
@@ -902,6 +902,19 @@ async def _answer_telegram_callback(callback_query_id: str):
         await client.post(url, json={"callback_query_id": callback_query_id})
 
 
+async def _edit_telegram_message(chat_id: int, message_id: int, text: str):
+    """Edita el texto de un mensaje y le quita el teclado inline.
+
+    Se usa al tocar un botón para dejar registro de la opción elegida (el
+    mensaje original queda mostrando la elección y los botones desaparecen, así
+    no se vuelven a tocar). Omitir reply_markup elimina el teclado.
+    """
+    from config import TELEGRAM_BOT_TOKEN
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await client.post(url, json={"chat_id": chat_id, "message_id": message_id, "text": text})
+
+
 @app.get("/whatsapp/webhook")
 async def whatsapp_verify(request: Request):
     params = request.query_params
@@ -974,7 +987,19 @@ async def telegram_webhook(request: Request):
             # callback_data inválido u oversized solo puede ser un payload
             # forjado (los botones legítimos llevan datos cortos): se ignora
             return {"status": "ok"}
+        # Registro de la elección: dejar el mensaje original mostrando la opción
+        # tocada y sacarle el teclado (así no se pierde lo que el usuario eligió
+        # ni se vuelven a tocar los botones).
+        chosen = button_label(cq.get("message"), cq["data"])
         await _answer_telegram_callback(cq["id"])
+        if chosen:
+            orig = (cq.get("message") or {}).get("text", "")
+            try:
+                await _edit_telegram_message(
+                    chat_id, cq["message"]["message_id"], (orig + "\n\n✓ " + chosen).strip()
+                )
+            except Exception:
+                logger.debug("no se pudo editar el mensaje del callback")
         try:
             t0 = time.monotonic()
             response = chatbot.handle_message("telegram", user_id, clean)
@@ -986,7 +1011,8 @@ async def telegram_webhook(request: Request):
                 action="callback_handled",
                 duration_ms=duration_ms,
             )
-            await _send_telegram(chat_id, response, reply_markup=build_reply_markup(response))
+            text, markup = build_message(response)
+            await _send_telegram(chat_id, text, reply_markup=markup)
         except (KeyError, TypeError) as e:
             logger.error("telegram webhook: callback handling error", extra={"error": str(e)})
         return {"status": "ok"}
@@ -1017,7 +1043,8 @@ async def telegram_webhook(request: Request):
             action="message_handled",
             duration_ms=duration_ms,
         )
-        await _send_telegram(chat_id, response, reply_markup=build_reply_markup(response))
+        text, markup = build_message(response)
+        await _send_telegram(chat_id, text, reply_markup=markup)
     except (KeyError, TypeError) as e:
         logger.error("telegram webhook: message handling error", extra={"error": str(e)})
     return {"status": "ok"}
