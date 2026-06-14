@@ -245,3 +245,16 @@ class TestAdminPanelDashboard:
         assert "Cerrar sesión" in html          # logout
         # El control segmentado de la cabecera fue reemplazado por el menú.
         assert 'id="tab-agenda"' not in html
+
+    def test_panel_detalle_de_cita(self, admin_client):
+        """El panel trae el panel lateral de detalle con cancelar."""
+        html = admin_client.get("/admin/panel").text
+        assert 'id="detail-panel"' in html
+        assert "openDetail" in html             # click en una cita abre el detalle
+        assert "/admin/cita/cancelar" in html   # acción de cancelar
+
+    def test_template_rutea_cancelar_cita(self):
+        """API Gateway debe enrutar POST /admin/cita/cancelar (si no, 403 en prod)."""
+        import pathlib
+        template = pathlib.Path(__file__).resolve().parents[1] / "template.yaml"
+        assert "Path: /admin/cita/cancelar" in template.read_text()
