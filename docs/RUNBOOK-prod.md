@@ -8,7 +8,7 @@ Cliente: Centro de Flores de Bach. Stack AWS: `chatbot-agendamiento` (us-east-1)
 El deploy es **automático al hacer push a `main`** (`.github/workflows/ci-cd.yml`):
 
 ```
-push/merge a main → [tests en runner self-hosted] → sam build → sam deploy
+push/merge a main → [tests en runner GitHub-hosted ubuntu] → sam build → sam deploy
                   → setWebhook Telegram → smoke test /health
 ```
 
@@ -49,8 +49,10 @@ python scripts/hash_admin_password.py   # imprime ADMIN_PASSWORD_HASH y un SESSI
 Cargá `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH` y `SESSION_SECRET` como secrets. El login
 del panel es `POST /admin/login` (usuario+contraseña → token de sesión de 8 h).
 
-**Infra:** el runner **self-hosted debe estar online**, cuenta AWS con permisos de
-CloudFormation/Lambda/DynamoDB/API Gateway, SAM CLI en el runner.
+**Infra:** runners **GitHub-hosted (`ubuntu-latest`)** — siempre online, sin máquina
+propia que mantener. Solo hace falta una cuenta AWS con permisos de
+CloudFormation/Lambda/DynamoDB/API Gateway (vía secrets `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY`). SAM y AWS CLI los provee la imagen de ubuntu.
 
 > **Crítico:** definí `ADMIN_USERNAME`/`ADMIN_PASSWORD_HASH`/`SESSION_SECRET` antes de este
 > deploy. Sin ellos el login del panel falla cerrado. `ADMIN_API_KEY` sigue sirviendo como
@@ -125,6 +127,7 @@ aws cloudformation describe-stacks --stack-name chatbot-agendamiento \
   `template.yaml` (evento `AdminReporte`). Sin esa ruta, la vista Reporte recibe
   403 de API Gateway aunque el endpoint exista en FastAPI. Cubierto por el test
   `test_template_rutea_admin_reporte`.
-- El runner self-hosted debe estar online o el deploy no corre.
+- El CI/CD corre en runners GitHub-hosted (`ubuntu-latest`); no depende de ninguna
+  máquina propia. (Antes era un Mac mini self-hosted que se dormía y cortaba runs.)
 - Hay dos motores conversacionales: `chatbot.py` (SQLite, dev local) y
   `chatbot_lambda.py` (DynamoDB, prod). Los cambios de lógica van en ambos.

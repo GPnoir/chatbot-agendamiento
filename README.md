@@ -12,6 +12,8 @@ Diseñado genérico y fácilmente personalizable. Incluido como ejemplo: un cent
 - 📋 Ver citas pendientes
 - 🔀 Multi-canal: Telegram + WhatsApp (misma lógica)
 - 👥 Multi-usuario: sesiones independientes por usuario
+- 🩺 Panel web admin (`/admin/panel`): login usuario+contraseña, agenda
+  interactiva, reportes y fichas de pacientes con notas del terapeuta
 
 ## 🏗️ Arquitectura
 
