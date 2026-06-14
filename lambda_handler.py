@@ -10,12 +10,15 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from mangum import Mangum
 
+import admin_auth
 import chatbot_lambda as chatbot
 import database_dynamo as db
 from config import (
     WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN,
     WHATSAPP_APP_SECRET, TELEGRAM_WEBHOOK_SECRET, ADMIN_API_KEY,
+    ADMIN_USERNAME, ADMIN_PASSWORD_HASH, SESSION_SECRET,
 )
+from rate_limiter import is_rate_limited
 from input_validation import (
     add_security_middleware,
     validate_telegram_callback,
@@ -46,13 +49,16 @@ async def health():
 
 
 def _check_admin_auth(request: Request) -> bool:
-    """Verify the Authorization: Bearer <key> header for admin endpoints.
+    """Verify the Authorization: Bearer <credential> header for admin endpoints.
 
-    Returns True when the key is valid. Fails closed: if ADMIN_API_KEY is
-    empty or unset, always returns False regardless of the presented token.
+    Acepta dos credenciales:
+    - un token de sesión válido emitido por POST /admin/login (firmado con
+      SESSION_SECRET), o
+    - la ADMIN_API_KEY cruda (break-glass para automatización y back-compat).
+
+    Falla cerrado: si no hay credenciales configuradas o el header falta/está
+    malformado, devuelve False.
     """
-    if not ADMIN_API_KEY:
-        return False
     auth_header = request.headers.get("Authorization", "")
     if not auth_header:
         return False
@@ -62,7 +68,56 @@ def _check_admin_auth(request: Request) -> bool:
     presented = credentials.lstrip(" ")
     if not presented:
         return False
-    return hmac.compare_digest(presented, ADMIN_API_KEY)
+    # 1) Token de sesión firmado (camino normal del panel).
+    if SESSION_SECRET and admin_auth.verify_session_token(presented, SESSION_SECRET) is not None:
+        return True
+    # 2) API key cruda (break-glass / automatización).
+    if ADMIN_API_KEY and hmac.compare_digest(presented, ADMIN_API_KEY):
+        return True
+    return False
+
+
+@app.post("/admin/login")
+async def admin_login(request: Request):
+    """Login del panel: {username, password} -> {token, expires_in}.
+
+    Falla cerrado si las credenciales no están configuradas. Rate-limited por
+    usuario para frenar fuerza bruta. Nunca loguea la contraseña.
+    """
+    expires_in = 8 * 3600
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return JSONResponse(status_code=400, content={"error": "invalid json"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "invalid body"})
+    username = body.get("username")
+    password = body.get("password")
+    if not isinstance(username, str) or not isinstance(password, str):
+        return JSONResponse(status_code=400, content={"error": "missing credentials"})
+    username = username.strip()
+    # Límite defensivo de tamaño (evita PBKDF2 sobre payloads enormes).
+    if not username or not password or len(username) > 150 or len(password) > 1024:
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+
+    # Rate limit por usuario presentado (clave separada del rate limit del bot).
+    if is_rate_limited(f"adminlogin:{username}"):
+        return JSONResponse(status_code=429, content={"error": "too many attempts"})
+
+    # Falla cerrado si la auth no está configurada en el entorno.
+    if not (ADMIN_USERNAME and ADMIN_PASSWORD_HASH and SESSION_SECRET):
+        logger.error("admin login attempted but auth is not configured")
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+
+    user_ok = hmac.compare_digest(username, ADMIN_USERNAME)
+    pass_ok = admin_auth.verify_password(password, ADMIN_PASSWORD_HASH)
+    # Comparar ambos siempre (no cortocircuitar) para no filtrar por timing.
+    if not (user_ok and pass_ok):
+        logger.warning("admin login failed")
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+
+    token = admin_auth.issue_session_token(ADMIN_USERNAME, SESSION_SECRET, ttl_seconds=expires_in)
+    return {"token": token, "expires_in": expires_in}
 
 
 @app.get("/admin/agenda")
@@ -288,10 +343,11 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
   <div id="login-box">
     <svg class="mark" width="30" height="30" viewBox="0 0 24 24" aria-hidden="true"><g fill="var(--accent)" fill-opacity="0.55"><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(72 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(144 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(216 12 12)"/><ellipse cx="12" cy="6.4" rx="2.5" ry="4.1" transform="rotate(288 12 12)"/></g><circle cx="12" cy="12" r="2.3" fill="var(--accent-strong)"/></svg>
     <h2>Centro de Flores de Bach</h2>
-    <p>Ingresá tu clave para ver la agenda.</p>
-    <input type="password" id="api-key-input" placeholder="Clave de acceso" autocomplete="current-password">
+    <p>Ingresá tu usuario y contraseña.</p>
+    <input type="text" id="login-user" placeholder="Usuario" autocomplete="username">
+    <input type="password" id="login-pass" placeholder="Contraseña" autocomplete="current-password">
     <button onclick="doLogin()">Entrar</button>
-    <div id="login-error">Clave incorrecta. Probá de nuevo.</div>
+    <div id="login-error">Usuario o contraseña incorrectos.</div>
   </div>
 </div>
 
@@ -343,25 +399,39 @@ function lunes(d){var r=new Date(d);var day=r.getDay();r.setDate(r.getDate()-((d
 
 var HORARIOS={0:{i:9,f:18},1:{i:9,f:18},2:{i:9,f:18},3:{i:9,f:18},4:{i:9,f:17},5:{i:9,f:13}};
 var DIAS=["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"];
-var offset=0,apiKey="",rangoDias=7;
+var offset=0,token="",rangoDias=7;
 
 function MARK(sz){return "<svg class='mark' width='"+sz+"' height='"+sz+"' viewBox='0 0 24 24' aria-hidden='true'><g fill='var(--accent)' fill-opacity='0.55'><ellipse cx='12' cy='6.4' rx='2.5' ry='4.1'/><ellipse cx='12' cy='6.4' rx='2.5' ry='4.1' transform='rotate(72 12 12)'/><ellipse cx='12' cy='6.4' rx='2.5' ry='4.1' transform='rotate(144 12 12)'/><ellipse cx='12' cy='6.4' rx='2.5' ry='4.1' transform='rotate(216 12 12)'/><ellipse cx='12' cy='6.4' rx='2.5' ry='4.1' transform='rotate(288 12 12)'/></g><circle cx='12' cy='12' r='2.3' fill='var(--accent-strong)'/></svg>";}
 
 /* auth */
-function doLogin(){var k=$("api-key-input").value.trim();if(k)verifyKey(k)}
-$("api-key-input").addEventListener("keydown",function(e){if(e.key==="Enter")doLogin()});
+function doLogin(){var u=$("login-user").value.trim(),p=$("login-pass").value;if(u&&p)login(u,p)}
+$("login-user").addEventListener("keydown",function(e){if(e.key==="Enter")doLogin()});
+$("login-pass").addEventListener("keydown",function(e){if(e.key==="Enter")doLogin()});
 function showApp(){$("login-overlay").style.display="none";$("topbar").hidden=false;$("app").hidden=false;$("cal").style.display="grid"}
-function showLogin(err){$("login-overlay").style.display="flex";$("topbar").hidden=true;$("app").hidden=true;$("login-error").style.display=err?"block":"none"}
-function onAuthLost(){apiKey="";sessionStorage.removeItem("admin_api_key");showLogin(true)}
+function showLogin(err){$("login-overlay").style.display="flex";$("topbar").hidden=true;$("app").hidden=true;$("login-error").style.display=err?"block":"none";var p=$("login-pass");if(p)p.value=""}
+function onAuthLost(){token="";sessionStorage.removeItem("admin_session");showLogin(true)}
+function logout(){token="";sessionStorage.removeItem("admin_session");showLogin(false)}
 
-async function verifyKey(k){
+async function login(u,p){
   var r;
-  try{r=await fetch(base()+"/admin/agenda?fecha="+fmt(new Date()),{headers:{"Authorization":"Bearer "+k}})}
+  try{r=await fetch(base()+"/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:u,password:p})})}
   catch(e){$("login-error").textContent="No se pudo conectar. Reintentá.";$("login-error").style.display="block";return}
-  if(r.ok){apiKey=k;sessionStorage.setItem("admin_api_key",k);showApp();switchView("agenda")}
-  else{sessionStorage.removeItem("admin_api_key");$("login-error").textContent="Clave incorrecta. Probá de nuevo.";$("login-error").style.display="block"}
+  if(r.ok){var d=await r.json();token=d.token;sessionStorage.setItem("admin_session",token);showApp();switchView("agenda")}
+  else if(r.status===429){$("login-error").textContent="Demasiados intentos. Esperá un momento.";$("login-error").style.display="block"}
+  else{sessionStorage.removeItem("admin_session");$("login-error").textContent="Usuario o contraseña incorrectos.";$("login-error").style.display="block"}
 }
-(function(){var s=sessionStorage.getItem("admin_api_key");if(s)verifyKey(s)})();
+
+/* Restaura la sesión: valida el token guardado contra un endpoint admin. */
+async function restoreSession(){
+  var s=sessionStorage.getItem("admin_session");
+  if(!s){return}
+  var r;
+  try{r=await fetch(base()+"/admin/agenda?fecha="+fmt(new Date()),{headers:{"Authorization":"Bearer "+s}})}
+  catch(e){return}
+  if(r.ok){token=s;showApp();switchView("agenda")}
+  else{sessionStorage.removeItem("admin_session")}
+}
+restoreSession();
 
 /* vistas */
 function switchView(view){
@@ -379,7 +449,7 @@ async function renderAgenda(){
   var dias=[];for(var i=0;i<7;i++){var d=new Date(lun);d.setDate(d.getDate()+i);dias.push(d)}
   $("rango").textContent=fmtCorto(dias[0])+" – "+fmtCorto(dias[6]);
   var r;
-  try{r=await fetch(base()+"/admin/agenda?desde="+fmt(dias[0])+"&hasta="+fmt(dias[6]),{headers:{"Authorization":"Bearer "+apiKey}})}
+  try{r=await fetch(base()+"/admin/agenda?desde="+fmt(dias[0])+"&hasta="+fmt(dias[6]),{headers:{"Authorization":"Bearer "+token}})}
   catch(e){return}
   if(r.status===401||r.status===403){onAuthLost();return}
   var data=await r.json();
@@ -427,7 +497,7 @@ async function loadReporte(){
   $("rep-rango").textContent="Del "+fmtCorto(desde)+" al "+fmtCorto(hasta);
   var rb=$("rep-body");rb.innerHTML=skeleton();
   var r;
-  try{r=await fetch(base()+"/admin/reporte?desde="+fmt(desde)+"&hasta="+fmt(hasta),{headers:{"Authorization":"Bearer "+apiKey}})}
+  try{r=await fetch(base()+"/admin/reporte?desde="+fmt(desde)+"&hasta="+fmt(hasta),{headers:{"Authorization":"Bearer "+token}})}
   catch(e){rb.innerHTML="<p class='rep-error'>No se pudo cargar el reporte.</p>";return}
   if(r.status===401||r.status===403){onAuthLost();return}
   if(!r.ok){rb.innerHTML="<p class='rep-error'>No se pudo cargar el reporte.</p>";return}
