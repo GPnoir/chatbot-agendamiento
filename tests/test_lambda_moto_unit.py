@@ -32,9 +32,18 @@ def _proximo_lunes() -> date:
 class TestInitDbSeed:
     def test_seeds_servicios(self):
         servicios = db.get_servicios()
-        assert len(servicios) == 3
+        assert len(servicios) == 2
         nombres = {s["nombre"] for s in servicios}
         assert "Consulta inicial" in nombres
+        assert "Preparación de esencias" not in nombres
+
+    def test_servicios_traen_precios_por_tramo(self):
+        servicios = db.get_servicios()
+        inicial = next(s for s in servicios if s["nombre"] == "Consulta inicial")
+        precios = inicial["precios"]
+        assert int(precios["convenio_tea"]) == 10000
+        assert int(precios["nino"]) == 15000
+        assert int(precios["adulto"]) == 20000
 
     def test_seeds_profesionales(self):
         profesionales = db.get_profesionales()
@@ -44,7 +53,7 @@ class TestInitDbSeed:
     def test_init_db_idempotente(self):
         db.init_db()
         db.init_db()
-        assert len(db.get_servicios()) == 3
+        assert len(db.get_servicios()) == 2
 
 
 class TestClientes:
@@ -95,6 +104,49 @@ class TestCitas:
         assert len(activas) == 1
         assert activas[0]["fecha"] == martes
         assert activas[0]["hora"] == "12:00"
+
+
+class TestPreciosCita:
+    """Cada cita guarda un snapshot del tramo y el precio (issue precios)."""
+
+    def test_crear_cita_snapshotea_tramo_adulto_por_defecto(self):
+        cliente = db.get_or_create_cliente("telegram", "precio_1", "Pia")
+        fecha = _proximo_lunes().isoformat()
+        cita = db.crear_cita(cliente["id"], 1, 1, fecha, "10:00")  # Consulta inicial
+        assert cita["tramo"] == "adulto"
+        assert int(cita["precio"]) == 20000
+
+    def test_actualizar_tramo_recalcula_precio(self):
+        cliente = db.get_or_create_cliente("telegram", "precio_2", "Quim")
+        fecha = _proximo_lunes().isoformat()
+        cita = db.crear_cita(cliente["id"], 1, 1, fecha, "11:00")
+        db.actualizar_tramo_cita(cita["PK"], cita["SK"], "convenio_tea")
+        actual = db.get_table().get_item(
+            Key={"PK": cita["PK"], "SK": cita["SK"]}
+        )["Item"]
+        assert actual["tramo"] == "convenio_tea"
+        assert int(actual["precio"]) == 10000
+
+    def test_actualizar_tramo_invalido_rechazado(self):
+        cliente = db.get_or_create_cliente("telegram", "precio_3", "Rita")
+        fecha = _proximo_lunes().isoformat()
+        cita = db.crear_cita(cliente["id"], 2, 1, fecha, "09:00")
+        with pytest.raises(ValueError):
+            db.actualizar_tramo_cita(cita["PK"], cita["SK"], "no_existe")
+
+    def test_sync_desactiva_servicio_retirado(self):
+        # Simular una tabla ya sembrada con el esquema viejo: un servicio
+        # extra (Preparación) activo que ya no está en config.
+        db.get_table().put_item(Item={
+            "PK": "SERVICE", "SK": "SERVICE#3",
+            "id": 3, "nombre": "Preparación de esencias",
+            "duracion_min": 45, "descripcion": "", "activo": True,
+        })
+        assert len(db.get_servicios()) == 3
+        db.init_db()  # re-init sobre tabla existente → sincroniza catálogo
+        nombres = {s["nombre"] for s in db.get_servicios()}
+        assert "Preparación de esencias" not in nombres
+        assert len(db.get_servicios()) == 2
 
 
 class TestDisponibilidad:
