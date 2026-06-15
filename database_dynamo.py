@@ -165,8 +165,57 @@ def get_fechas_disponibles(profesional_id: int, servicio_duracion: int, dias: in
     return fechas
 
 
+class SlotNoDisponibleError(Exception):
+    """El horario solicitado para el profesional ya está reservado.
+
+    Se levanta cuando no se puede tomar el lock atómico del slot (otra cita
+    confirmada lo ocupa). Evita la doble reserva del mismo horario.
+    """
+
+    def __init__(self, profesional_id, fecha: str, hora: str):
+        self.profesional_id = profesional_id
+        self.fecha = fecha
+        self.hora = hora
+        super().__init__(f"Slot ocupado: prof {profesional_id} {fecha} {hora}")
+
+
+def _slot_pk(profesional_id, fecha: str, hora: str) -> str:
+    return f"SLOT#{profesional_id}#{fecha}#{hora}"
+
+
+def _acquire_slot(table, profesional_id, fecha: str, hora: str, cliente_id) -> None:
+    """Reserva atómica del horario del profesional: un único confirmado por slot.
+
+    Usa una escritura condicional sobre un ítem-lock dedicado. Si ya existe
+    (otra cita tomó el horario), lanza SlotNoDisponibleError.
+    """
+    try:
+        table.put_item(
+            Item={
+                "PK": _slot_pk(profesional_id, fecha, hora),
+                "SK": "LOCK",
+                "cliente_id": cliente_id,
+                "profesional_id": profesional_id,
+                "fecha": fecha,
+                "hora": hora,
+                "created_at": datetime.utcnow().isoformat(),
+            },
+            ConditionExpression=Attr("PK").not_exists(),
+        )
+    except table.meta.client.exceptions.ConditionalCheckFailedException:
+        raise SlotNoDisponibleError(profesional_id, fecha, hora)
+
+
+def _release_slot(table, profesional_id, fecha: str, hora: str) -> None:
+    """Libera el lock del horario (al cancelar o reagendar)."""
+    table.delete_item(Key={"PK": _slot_pk(profesional_id, fecha, hora), "SK": "LOCK"})
+
+
 def crear_cita(cliente_id: str, servicio_id: int, profesional_id: int, fecha: str, hora: str) -> dict:
     table = get_table()
+    # Tomar el lock del slot ANTES de escribir: garantiza que dos reservas
+    # simultáneas (race / reintentos de webhook) no dupliquen el horario.
+    _acquire_slot(table, profesional_id, fecha, hora, cliente_id)
     cita_id = f"{fecha}#{hora}#{profesional_id}"
     item = {
         "PK": f"APPOINTMENT#{cliente_id}",
@@ -193,12 +242,18 @@ def crear_cita(cliente_id: str, servicio_id: int, profesional_id: int, fecha: st
     prof = next((p for p in profesionales if p["id"] == profesional_id), None)
     if prof:
         item["profesional_nombre"] = prof["nombre"]
-    # Sync best-effort a Google Calendar (issue #14): guardamos el event id
-    # para poder borrar/actualizar el evento al cancelar o modificar la cita.
-    event_id = google_calendar.sync_create(item)
-    if event_id:
-        item["gcal_event_id"] = event_id
-    table.put_item(Item=item)
+    try:
+        # Sync best-effort a Google Calendar (issue #14): guardamos el event id
+        # para poder borrar/actualizar el evento al cancelar o modificar la cita.
+        event_id = google_calendar.sync_create(item)
+        if event_id:
+            item["gcal_event_id"] = event_id
+        table.put_item(Item=item)
+    except Exception:
+        # Si falla la escritura de la cita, liberamos el lock para no dejar el
+        # horario bloqueado sin una cita real detrás.
+        _release_slot(table, profesional_id, fecha, hora)
+        raise
     return item
 
 
@@ -272,6 +327,9 @@ def cancelar_cita(cita_pk: str, cita_sk: str):
     # Sync best-effort a Google Calendar (issue #14): borra el evento asociado.
     if item and item.get("gcal_event_id"):
         google_calendar.sync_cancel(item["gcal_event_id"])
+    # Liberar el lock del slot para que el horario vuelva a estar disponible.
+    if item:
+        _release_slot(table, item["profesional_id"], item["fecha"], item["hora"])
 
 
 def modificar_cita(cita_pk: str, cita_sk: str, nueva_fecha: str, nueva_hora: str):
@@ -281,10 +339,15 @@ def modificar_cita(cita_pk: str, cita_sk: str, nueva_fecha: str, nueva_hora: str
     if "Item" not in resp:
         return
     cita = resp["Item"]
-    # Cancelar la vieja
-    cancelar_cita(cita_pk, cita_sk)
-    # Crear nueva
+    # Reagendar al mismo horario: no hay nada que cambiar (y evita que el lock
+    # del propio slot choque consigo mismo).
+    if cita["fecha"] == nueva_fecha and cita["hora"] == nueva_hora:
+        return
+    # Crear la nueva PRIMERO: si el horario está ocupado, crear_cita lanza
+    # SlotNoDisponibleError y la cita original queda intacta (no se pierde).
     crear_cita(cita["cliente_id"], cita["servicio_id"], cita["profesional_id"], nueva_fecha, nueva_hora)
+    # Recién entonces cancelar la vieja (libera su slot).
+    cancelar_cita(cita_pk, cita_sk)
 
 
 def get_citas_rango(desde: str, hasta: str) -> list[dict]:
