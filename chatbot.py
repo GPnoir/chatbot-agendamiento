@@ -234,7 +234,12 @@ def _handle_booking_confirm(session, canal, canal_user_id, text):
         prof = session["data"]["profesional"]
         fecha = session["data"]["fecha"]
         hora = session["data"]["hora"]
-        db.crear_cita(cliente["id"], serv["id"], prof["id"], fecha.isoformat(), hora)
+        try:
+            db.crear_cita(cliente["id"], serv["id"], prof["id"], fecha.isoformat(), hora)
+        except db.SlotNoDisponibleError:
+            session["state"] = IDLE
+            session["data"] = {}
+            return "😕 Ese horario se acaba de ocupar. Escribe *menu* para elegir otro."
         session["state"] = IDLE
         session["data"] = {}
         return MENSAJES["cita_confirmada"].format(
@@ -341,7 +346,12 @@ def _handle_modify_confirm(session, text):
         cita = session["data"]["cita_seleccionada"]
         fecha = session["data"]["nueva_fecha"]
         hora = session["data"]["nueva_hora"]
-        db.modificar_cita(cita["id"], fecha.isoformat(), hora)
+        try:
+            db.modificar_cita(cita["id"], fecha.isoformat(), hora)
+        except db.SlotNoDisponibleError:
+            session["state"] = IDLE
+            session["data"] = {}
+            return "😕 Ese horario se acaba de ocupar. Tu cita quedó como estaba. Escribe *menu* para intentar otro horario."
         session["state"] = IDLE
         session["data"] = {}
         return f"✅ Cita reagendada a {fecha.strftime('%d/%m/%Y')} a las {hora}.\n\nEscribe *menu* para volver."

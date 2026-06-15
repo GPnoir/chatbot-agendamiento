@@ -3,7 +3,7 @@
 Usa una base de datos SQLite temporal para cada test.
 """
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -177,6 +177,30 @@ class TestCitas:
         citas = fresh_db.get_citas_cliente(cliente["id"])
         assert citas[0]["fecha"] == fecha_nueva
         assert citas[0]["hora"] == "11:00"
+
+    def test_no_permite_doble_reserva_mismo_slot(self, fresh_db):
+        """Paridad con prod: dos citas confirmadas no pueden compartir el mismo
+        horario del profesional (bug 'duplicado al agendar')."""
+        c1 = fresh_db.get_or_create_cliente("test", TEST_USER)
+        c2 = fresh_db.get_or_create_cliente("test", "otro_user")
+        servicios = fresh_db.get_servicios()
+        prof = fresh_db.get_profesionales()[0]["id"]
+        fecha = (date.today() + timedelta(days=7)).isoformat()
+        fresh_db.crear_cita(c1["id"], servicios[0]["id"], prof, fecha, "10:00")
+        with pytest.raises(fresh_db.SlotNoDisponibleError):
+            fresh_db.crear_cita(c2["id"], servicios[0]["id"], prof, fecha, "10:00")
+
+    def test_cancelar_libera_el_slot(self, fresh_db):
+        c1 = fresh_db.get_or_create_cliente("test", TEST_USER)
+        c2 = fresh_db.get_or_create_cliente("test", "otro_user")
+        servicios = fresh_db.get_servicios()
+        prof = fresh_db.get_profesionales()[0]["id"]
+        fecha = (date.today() + timedelta(days=7)).isoformat()
+        cita = fresh_db.crear_cita(c1["id"], servicios[0]["id"], prof, fecha, "10:00")
+        fresh_db.cancelar_cita(cita["id"])
+        # liberado: otro paciente puede tomar el mismo horario
+        fresh_db.crear_cita(c2["id"], servicios[0]["id"], prof, fecha, "10:00")
+        assert len(fresh_db.get_citas_cliente(c2["id"])) == 1
 
     def test_get_citas_solo_futuras(self, fresh_db):
         """get_citas_cliente solo retorna citas desde hoy en adelante."""

@@ -97,6 +97,63 @@ class TestCitas:
         assert activas[0]["hora"] == "12:00"
 
 
+class TestDobleReserva:
+    """El mismo horario de un profesional no puede tener dos citas confirmadas
+    (bug: 'duplicado cuando se agenda hora')."""
+
+    def _slot_confirmadas(self, fecha, hora, prof=1):
+        from boto3.dynamodb.conditions import Key, Attr
+        resp = db.get_table().query(
+            IndexName="GSI1",
+            KeyConditionExpression=Key("GSI1PK").eq(f"APPT#PROF#{prof}")
+            & Key("GSI1SK").eq(f"DATE#{fecha}#{hora}"),
+            FilterExpression=Attr("estado").eq("confirmada"),
+        )
+        return resp["Items"]
+
+    def test_dos_pacientes_no_pueden_tomar_el_mismo_slot(self):
+        a = db.get_or_create_cliente("telegram", "dup_a", "Ana")
+        b = db.get_or_create_cliente("telegram", "dup_b", "Beto")
+        lunes = _proximo_lunes().isoformat()
+        db.crear_cita(a["id"], 1, 1, lunes, "10:00")
+        with pytest.raises(db.SlotNoDisponibleError):
+            db.crear_cita(b["id"], 1, 1, lunes, "10:00")
+        assert len(self._slot_confirmadas(lunes, "10:00")) == 1
+
+    def test_cancelar_libera_el_slot(self):
+        a = db.get_or_create_cliente("telegram", "dup_c", "Ceci")
+        b = db.get_or_create_cliente("telegram", "dup_d", "Dani")
+        lunes = _proximo_lunes().isoformat()
+        cita = db.crear_cita(a["id"], 1, 1, lunes, "11:00")
+        db.cancelar_cita(cita["PK"], cita["SK"])
+        # el slot quedó libre: otro paciente puede tomarlo
+        db.crear_cita(b["id"], 1, 1, lunes, "11:00")
+        assert len(self._slot_confirmadas(lunes, "11:00")) == 1
+
+    def test_modificar_a_slot_ocupado_no_pierde_la_cita(self):
+        a = db.get_or_create_cliente("telegram", "dup_e", "Eva")
+        b = db.get_or_create_cliente("telegram", "dup_f", "Fran")
+        lunes = _proximo_lunes().isoformat()
+        cita_a = db.crear_cita(a["id"], 1, 1, lunes, "09:00")
+        db.crear_cita(b["id"], 1, 1, lunes, "12:00")
+        # A intenta reagendar a las 12:00 (ocupado por B) → debe fallar
+        with pytest.raises(db.SlotNoDisponibleError):
+            db.modificar_cita(cita_a["PK"], cita_a["SK"], lunes, "12:00")
+        # la cita de A sigue viva en su horario original
+        activas = db.get_citas_cliente(a["id"])
+        assert len(activas) == 1
+        assert activas[0]["hora"] == "09:00"
+
+    def test_reagendar_al_mismo_slot_no_falla(self):
+        a = db.get_or_create_cliente("telegram", "dup_g", "Gabo")
+        lunes = _proximo_lunes().isoformat()
+        cita = db.crear_cita(a["id"], 1, 1, lunes, "10:00")
+        db.modificar_cita(cita["PK"], cita["SK"], lunes, "10:00")  # mismo slot
+        activas = db.get_citas_cliente(a["id"])
+        assert len(activas) == 1
+        assert activas[0]["hora"] == "10:00"
+
+
 class TestDisponibilidad:
     def test_horario_normal_ofrece_slots(self):
         horas = db.get_horas_disponibles(1, _proximo_lunes(), 60)
@@ -144,6 +201,47 @@ class TestDisponibilidad:
     def test_domingo_sin_horario(self):
         domingo = _proximo_lunes() + timedelta(days=6)
         assert db.get_horas_disponibles(1, domingo, 30) == []
+
+
+class TestBookingConfirmSlotOcupado:
+    """Si el slot se ocupa entre que se muestran las horas y el usuario
+    confirma, el bot avisa con un mensaje y no revienta (ni duplica)."""
+
+    def test_confirmar_slot_ocupado_avisa(self):
+        import chatbot_lambda as cb
+
+        canal, uid = "telegram", "confirm_race"
+        cliente = db.get_or_create_cliente(canal, uid, "Race")
+        lunes = _proximo_lunes()
+        servicios = db.get_servicios()
+        serv = next(s for s in servicios if "inicial" in s["nombre"].lower())
+        # Llevar la sesión hasta BOOKING_CONFIRM con un slot elegido
+        cb.handle_message(canal, uid, "menu")
+        cb.handle_message(canal, uid, "1")          # agendar → lista de servicios
+        cb.handle_message(canal, uid, "1")          # servicio → lista de fechas
+        cb.handle_message(canal, uid, "1")          # fecha → lista de horas
+        cb.handle_message(canal, uid, "1")          # hora → pide nombre
+        cb.handle_message(canal, uid, "Race")       # nombre → BOOKING_CONFIRM
+        sesion = session_store.get_session(uid)
+        assert sesion["state"] == cb.BOOKING_CONFIRM
+        fecha_sel = sesion["data"]["fecha"]
+        hora_sel = sesion["data"]["hora"]
+        # Otro paciente ocupa exactamente ese slot
+        otro = db.get_or_create_cliente(canal, "confirm_race_otro", "Otro")
+        db.crear_cita(otro["id"], serv["id"], 1, fecha_sel.isoformat(), hora_sel)
+
+        resp = cb.handle_message(canal, uid, "si")  # confirmar
+        assert "ocup" in resp.lower()
+        assert session_store.get_session(uid)["state"] == cb.IDLE
+        # solo existe la cita del otro paciente en ese slot
+        from boto3.dynamodb.conditions import Key, Attr
+        confirmadas = db.get_table().query(
+            IndexName="GSI1",
+            KeyConditionExpression=Key("GSI1PK").eq("APPT#PROF#1")
+            & Key("GSI1SK").eq(f"DATE#{fecha_sel.isoformat()}#{hora_sel}"),
+            FilterExpression=Attr("estado").eq("confirmada"),
+        )["Items"]
+        assert len(confirmadas) == 1
 
 
 # ---------------------------------------------------------------------------
