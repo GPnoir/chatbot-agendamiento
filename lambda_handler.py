@@ -915,6 +915,15 @@ async def _edit_telegram_message(chat_id: int, message_id: int, text: str):
         await client.post(url, json={"chat_id": chat_id, "message_id": message_id, "text": text})
 
 
+def _reset_user_session(user_id: str) -> None:
+    """Resetea la sesión a IDLE: un fallo inesperado no debe dejar al usuario
+    pegado en un estado intermedio sin forma de salir salvo esperar el TTL."""
+    try:
+        chatbot._save_session(user_id, {"state": chatbot.IDLE, "data": {}})
+    except Exception:
+        logger.debug("no se pudo resetear la sesión tras un error")
+
+
 @app.get("/whatsapp/webhook")
 async def whatsapp_verify(request: Request):
     params = request.query_params
@@ -939,14 +948,18 @@ async def whatsapp_message(request: Request):
             return {"status": "ok"}
         from_number = message["from"]
         raw_text = message["text"]["body"]
-        clean = validate_message_text(raw_text)
-        if clean is None:
-            if is_oversized(raw_text):
-                await _send_whatsapp(
-                    from_number,
-                    "Tu mensaje es demasiado largo (máximo 500 caracteres).",
-                )
-            return {"status": "ok"}
+    except (KeyError, IndexError, ValueError):
+        return {"status": "ok"}
+
+    clean = validate_message_text(raw_text)
+    if clean is None:
+        if is_oversized(raw_text):
+            await _send_whatsapp(
+                from_number,
+                "Tu mensaje es demasiado largo (máximo 500 caracteres).",
+            )
+        return {"status": "ok"}
+    try:
         t0 = time.monotonic()
         response = chatbot.handle_message("whatsapp", from_number, clean)
         duration_ms = (time.monotonic() - t0) * 1000
@@ -958,8 +971,13 @@ async def whatsapp_message(request: Request):
             duration_ms=duration_ms,
         )
         await _send_whatsapp(from_number, response)
-    except (KeyError, IndexError, ValueError):
-        pass
+    except Exception as e:
+        logger.error("whatsapp webhook: message handling error", extra={"error": str(e)})
+        _reset_user_session(from_number)
+        try:
+            await _send_whatsapp(from_number, chatbot.MENSAJES["error_interno"])
+        except Exception:
+            logger.debug("no se pudo avisar al usuario del error")
     return {"status": "ok"}
 
 
@@ -1013,8 +1031,13 @@ async def telegram_webhook(request: Request):
             )
             text, markup = build_message(response)
             await _send_telegram(chat_id, text, reply_markup=markup)
-        except (KeyError, TypeError) as e:
+        except Exception as e:
             logger.error("telegram webhook: callback handling error", extra={"error": str(e)})
+            _reset_user_session(user_id)
+            try:
+                await _send_telegram(chat_id, chatbot.MENSAJES["error_interno"])
+            except Exception:
+                logger.debug("no se pudo avisar al usuario del error")
         return {"status": "ok"}
 
     if not validate_telegram_payload(data):
@@ -1045,8 +1068,13 @@ async def telegram_webhook(request: Request):
         )
         text, markup = build_message(response)
         await _send_telegram(chat_id, text, reply_markup=markup)
-    except (KeyError, TypeError) as e:
+    except Exception as e:
         logger.error("telegram webhook: message handling error", extra={"error": str(e)})
+        _reset_user_session(user_id)
+        try:
+            await _send_telegram(chat_id, chatbot.MENSAJES["error_interno"])
+        except Exception:
+            logger.debug("no se pudo avisar al usuario del error")
     return {"status": "ok"}
 
 

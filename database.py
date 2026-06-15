@@ -9,6 +9,20 @@ from config import HORARIOS_DEFAULT, PROFESIONALES, SERVICIOS, TRAMO_DEFAULT, TR
 DB_PATH = Path(__file__).parent / "data" / "agendamiento.db"
 
 
+class SlotNoDisponibleError(Exception):
+    """El horario solicitado para el profesional ya está reservado.
+
+    Espeja database_dynamo.SlotNoDisponibleError para que ambos motores
+    rechacen la doble reserva del mismo horario.
+    """
+
+    def __init__(self, profesional_id, fecha: str, hora: str):
+        self.profesional_id = profesional_id
+        self.fecha = fecha
+        self.hora = hora
+        super().__init__(f"Slot ocupado: prof {profesional_id} {fecha} {hora}")
+
+
 def get_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
@@ -180,6 +194,15 @@ def get_fechas_disponibles(profesional_id: int, servicio_duracion: int, dias: in
 
 def crear_cita(cliente_id: int, servicio_id: int, profesional_id: int, fecha: str, hora: str) -> dict:
     conn = get_db()
+    # Un solo confirmado por horario del profesional: rechaza la doble reserva.
+    ocupado = conn.execute(
+        """SELECT 1 FROM citas
+           WHERE profesional_id = ? AND fecha = ? AND hora = ? AND estado = 'confirmada'""",
+        (profesional_id, fecha, hora),
+    ).fetchone()
+    if ocupado:
+        conn.close()
+        raise SlotNoDisponibleError(profesional_id, fecha, hora)
     # Snapshot del tramo (por defecto "adulto") y su precio según el servicio.
     srow = conn.execute("SELECT precios_json FROM servicios WHERE id = ?", (servicio_id,)).fetchone()
     precios = json.loads(srow["precios_json"]) if srow and srow["precios_json"] else {}
@@ -239,6 +262,21 @@ def cancelar_cita(cita_id: int):
 
 def modificar_cita(cita_id: int, nueva_fecha: str, nueva_hora: str):
     conn = get_db()
+    row = conn.execute("SELECT profesional_id FROM citas WHERE id = ?", (cita_id,)).fetchone()
+    if row is None:
+        conn.close()
+        return
+    prof = row["profesional_id"]
+    # No reagendar a un horario que ya tiene otra cita confirmada.
+    ocupado = conn.execute(
+        """SELECT 1 FROM citas
+           WHERE profesional_id = ? AND fecha = ? AND hora = ?
+                 AND estado = 'confirmada' AND id != ?""",
+        (prof, nueva_fecha, nueva_hora, cita_id),
+    ).fetchone()
+    if ocupado:
+        conn.close()
+        raise SlotNoDisponibleError(prof, nueva_fecha, nueva_hora)
     conn.execute("UPDATE citas SET fecha = ?, hora = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                  (nueva_fecha, nueva_hora, cita_id))
     conn.commit()
