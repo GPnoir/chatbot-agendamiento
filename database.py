@@ -1,9 +1,10 @@
 """Base de datos SQLite para agendamiento."""
+import json
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from config import HORARIOS_DEFAULT, PROFESIONALES, SERVICIOS
+from config import HORARIOS_DEFAULT, PROFESIONALES, SERVICIOS, TRAMO_DEFAULT, TRAMOS_PRECIO
 
 DB_PATH = Path(__file__).parent / "data" / "agendamiento.db"
 
@@ -38,6 +39,7 @@ def init_db():
             nombre TEXT NOT NULL,
             duracion_min INTEGER NOT NULL,
             descripcion TEXT DEFAULT '',
+            precios_json TEXT DEFAULT '{}',
             activo BOOLEAN DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS profesionales (
@@ -69,6 +71,8 @@ def init_db():
             fecha DATE NOT NULL,
             hora TEXT NOT NULL,
             estado TEXT DEFAULT 'confirmada',
+            tramo TEXT DEFAULT 'adulto',
+            precio INTEGER,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
@@ -76,8 +80,10 @@ def init_db():
     # Seed data si está vacío
     if not conn.execute("SELECT 1 FROM servicios LIMIT 1").fetchone():
         for s in SERVICIOS:
-            conn.execute("INSERT INTO servicios (nombre, duracion_min, descripcion) VALUES (?, ?, ?)",
-                         (s["nombre"], s["duracion"], s.get("descripcion", "")))
+            conn.execute(
+                "INSERT INTO servicios (nombre, duracion_min, descripcion, precios_json) VALUES (?, ?, ?, ?)",
+                (s["nombre"], s["duracion"], s.get("descripcion", ""), json.dumps(s.get("precios", {}))),
+            )
     if not conn.execute("SELECT 1 FROM profesionales LIMIT 1").fetchone():
         for p in PROFESIONALES:
             conn.execute("INSERT INTO profesionales (nombre, especialidad) VALUES (?, ?)",
@@ -95,7 +101,12 @@ def get_servicios():
     conn = get_db()
     rows = conn.execute("SELECT * FROM servicios WHERE activo = 1").fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["precios"] = json.loads(d.get("precios_json") or "{}")
+        result.append(d)
+    return result
 
 
 def get_profesionales():
@@ -192,9 +203,14 @@ def crear_cita(cliente_id: int, servicio_id: int, profesional_id: int, fecha: st
     if ocupado:
         conn.close()
         raise SlotNoDisponibleError(profesional_id, fecha, hora)
+    # Snapshot del tramo (por defecto "adulto") y su precio según el servicio.
+    srow = conn.execute("SELECT precios_json FROM servicios WHERE id = ?", (servicio_id,)).fetchone()
+    precios = json.loads(srow["precios_json"]) if srow and srow["precios_json"] else {}
+    tramo = TRAMO_DEFAULT
+    precio = precios.get(tramo)
     conn.execute(
-        "INSERT INTO citas (cliente_id, servicio_id, profesional_id, fecha, hora) VALUES (?, ?, ?, ?, ?)",
-        (cliente_id, servicio_id, profesional_id, fecha, hora)
+        "INSERT INTO citas (cliente_id, servicio_id, profesional_id, fecha, hora, tramo, precio) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (cliente_id, servicio_id, profesional_id, fecha, hora, tramo, precio)
     )
     conn.commit()
     row = conn.execute("SELECT * FROM citas WHERE id = last_insert_rowid()").fetchone()
@@ -263,5 +279,29 @@ def modificar_cita(cita_id: int, nueva_fecha: str, nueva_hora: str):
         raise SlotNoDisponibleError(prof, nueva_fecha, nueva_hora)
     conn.execute("UPDATE citas SET fecha = ?, hora = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                  (nueva_fecha, nueva_hora, cita_id))
+    conn.commit()
+    conn.close()
+
+
+def actualizar_tramo_cita(cita_id: int, tramo: str):
+    """Asigna el tramo de precio de una cita y recalcula su precio snapshot.
+
+    Espeja database_dynamo.actualizar_tramo_cita. Lanza ValueError si el tramo
+    no existe.
+    """
+    if tramo not in TRAMOS_PRECIO:
+        raise ValueError(f"Tramo inválido: {tramo}")
+    conn = get_db()
+    row = conn.execute(
+        "SELECT s.precios_json FROM citas c JOIN servicios s ON c.servicio_id = s.id WHERE c.id = ?",
+        (cita_id,),
+    ).fetchone()
+    if row is None:
+        conn.close()
+        return
+    precios = json.loads(row["precios_json"]) if row["precios_json"] else {}
+    precio = precios.get(tramo)
+    conn.execute("UPDATE citas SET tramo = ?, precio = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                 (tramo, precio, cita_id))
     conn.commit()
     conn.close()

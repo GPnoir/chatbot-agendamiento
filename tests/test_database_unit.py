@@ -55,6 +55,15 @@ class TestServicios:
         assert "duracion_min" in servicio
         assert "activo" in servicio
 
+    def test_servicios_traen_precios_por_tramo(self, fresh_db):
+        inicial = next(s for s in fresh_db.get_servicios() if s["nombre"] == "Consulta inicial")
+        assert inicial["precios"] == {"convenio_tea": 10000, "nino": 15000, "adulto": 20000}
+
+    def test_no_incluye_preparacion_de_esencias(self, fresh_db):
+        nombres = {s["nombre"] for s in fresh_db.get_servicios()}
+        assert "Preparación de esencias" not in nombres
+        assert len(fresh_db.get_servicios()) == 2
+
     def test_servicio_inactivo_no_aparece(self, fresh_db):
         conn = fresh_db.get_db()
         conn.execute("UPDATE servicios SET activo = 0 WHERE id = 1")
@@ -177,6 +186,26 @@ class TestCitas:
         citas = fresh_db.get_citas_cliente(cliente["id"])
         assert citas[0]["fecha"] == fecha_nueva
         assert citas[0]["hora"] == "11:00"
+
+    def test_crear_cita_snapshotea_tramo_y_precio(self, fresh_db):
+        cliente = fresh_db.get_or_create_cliente("test", TEST_USER)
+        inicial = next(s for s in fresh_db.get_servicios() if s["nombre"] == "Consulta inicial")
+        prof = fresh_db.get_profesionales()[0]["id"]
+        fecha = (date.today() + timedelta(days=7)).isoformat()
+        cita = fresh_db.crear_cita(cliente["id"], inicial["id"], prof, fecha, "10:00")
+        assert cita["tramo"] == "adulto"
+        assert cita["precio"] == 20000
+
+    def test_actualizar_tramo_recalcula_precio(self, fresh_db):
+        cliente = fresh_db.get_or_create_cliente("test", TEST_USER)
+        inicial = next(s for s in fresh_db.get_servicios() if s["nombre"] == "Consulta inicial")
+        prof = fresh_db.get_profesionales()[0]["id"]
+        fecha = (date.today() + timedelta(days=7)).isoformat()
+        cita = fresh_db.crear_cita(cliente["id"], inicial["id"], prof, fecha, "10:00")
+        fresh_db.actualizar_tramo_cita(cita["id"], "nino")
+        actual = next(c for c in fresh_db.get_historial_cliente(cliente["id"]) if c["id"] == cita["id"])
+        assert actual["tramo"] == "nino"
+        assert actual["precio"] == 15000
 
     def test_no_permite_doble_reserva_mismo_slot(self, fresh_db):
         """Paridad con prod: dos citas confirmadas no pueden compartir el mismo

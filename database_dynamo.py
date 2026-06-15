@@ -6,7 +6,7 @@ from typing import Optional
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
 
-from config import SERVICIOS, PROFESIONALES, HORARIOS_DEFAULT
+from config import SERVICIOS, PROFESIONALES, HORARIOS_DEFAULT, TRAMO_DEFAULT, TRAMOS_PRECIO
 import google_calendar
 
 TABLE_NAME = os.getenv("DYNAMODB_TABLE", "chatbot-agendamiento")
@@ -22,11 +22,14 @@ def get_table():
 
 
 def init_db():
-    """Seed data si la tabla está vacía."""
+    """Seed data si la tabla está vacía; si ya existe, sincroniza el catálogo."""
     table = get_table()
     # Check si ya hay servicios
     resp = table.query(KeyConditionExpression=Key("PK").eq("SERVICE"), Limit=1)
     if resp["Items"]:
+        # Tabla ya sembrada: aplicar cambios de catálogo (precios por tramo,
+        # servicios retirados) sin re-sembrar a mano.
+        _sync_catalogo_servicios(table)
         return
     # Seed servicios
     with table.batch_writer() as batch:
@@ -36,6 +39,7 @@ def init_db():
                 "id": i, "nombre": s["nombre"],
                 "duracion_min": s["duracion"],
                 "descripcion": s.get("descripcion", ""),
+                "precios": s.get("precios", {}),
                 "activo": True,
             })
         # Seed profesionales
@@ -53,6 +57,41 @@ def init_db():
                     "profesional_id": i, "dia_semana": dia,
                     "hora_inicio": h["inicio"], "hora_fin": h["fin"],
                 })
+
+
+def _sync_catalogo_servicios(table) -> None:
+    """Idempotente: actualiza el catálogo de servicios sobre una tabla ya
+    sembrada (precios por tramo) y desactiva los servicios retirados de config
+    (p. ej. 'Preparación de esencias'). Permite que cambios de catálogo lleguen
+    a producción sin re-sembrar a mano."""
+    # Upsert de los servicios vigentes (id estable por índice).
+    for i, s in enumerate(SERVICIOS, 1):
+        table.update_item(
+            Key={"PK": "SERVICE", "SK": f"SERVICE#{i}"},
+            UpdateExpression=(
+                "SET #n = :n, duracion_min = :d, descripcion = :de, "
+                "precios = :p, activo = :a, id = :id"
+            ),
+            ExpressionAttributeNames={"#n": "nombre"},
+            ExpressionAttributeValues={
+                ":n": s["nombre"], ":d": s["duracion"],
+                ":de": s.get("descripcion", ""), ":p": s.get("precios", {}),
+                ":a": True, ":id": i,
+            },
+        )
+    # Desactivar cualquier SERVICE# con índice mayor al catálogo actual.
+    resp = table.query(KeyConditionExpression=Key("PK").eq("SERVICE"))
+    for it in resp.get("Items", []):
+        try:
+            idx = int(it.get("id", 0))
+        except (TypeError, ValueError):
+            continue
+        if idx > len(SERVICIOS) and it.get("activo"):
+            table.update_item(
+                Key={"PK": it["PK"], "SK": it["SK"]},
+                UpdateExpression="SET activo = :a",
+                ExpressionAttributeValues={":a": False},
+            )
 
 
 def get_servicios() -> list[dict]:
@@ -238,6 +277,13 @@ def crear_cita(cliente_id: str, servicio_id: int, profesional_id: int, fecha: st
     if serv:
         item["servicio_nombre"] = serv["nombre"]
         item["servicio_duracion"] = serv["duracion_min"]
+        # Snapshot del tramo y precio: la cita conserva su valor histórico aunque
+        # luego cambien los precios. El tramo arranca en "adulto" y la terapeuta
+        # lo ajusta desde el panel.
+        precios = serv.get("precios") or {}
+        item["tramo"] = TRAMO_DEFAULT
+        if TRAMO_DEFAULT in precios:
+            item["precio"] = precios[TRAMO_DEFAULT]
     profesionales = get_profesionales()
     prof = next((p for p in profesionales if p["id"] == profesional_id), None)
     if prof:
@@ -348,6 +394,31 @@ def modificar_cita(cita_pk: str, cita_sk: str, nueva_fecha: str, nueva_hora: str
     crear_cita(cita["cliente_id"], cita["servicio_id"], cita["profesional_id"], nueva_fecha, nueva_hora)
     # Recién entonces cancelar la vieja (libera su slot).
     cancelar_cita(cita_pk, cita_sk)
+
+
+def actualizar_tramo_cita(cita_pk: str, cita_sk: str, tramo: str) -> None:
+    """Asigna el tramo de precio de una cita y recalcula su precio snapshot.
+
+    Lo usa el panel para registrar la categoría del paciente (convenio TEA/TDAH,
+    niño o adulto particular). Lanza ValueError si el tramo no existe.
+    """
+    if tramo not in TRAMOS_PRECIO:
+        raise ValueError(f"Tramo inválido: {tramo}")
+    table = get_table()
+    resp = table.get_item(Key={"PK": cita_pk, "SK": cita_sk})
+    item = resp.get("Item")
+    if not item:
+        return
+    servicios = get_servicios()
+    serv = next((s for s in servicios if s["id"] == item.get("servicio_id")), None)
+    precios = (serv or {}).get("precios") or {}
+    update = "SET tramo = :t, updated_at = :u"
+    values = {":t": tramo, ":u": datetime.utcnow().isoformat()}
+    if tramo in precios:
+        update += ", precio = :p"
+        values[":p"] = precios[tramo]
+    table.update_item(Key={"PK": cita_pk, "SK": cita_sk},
+                      UpdateExpression=update, ExpressionAttributeValues=values)
 
 
 def get_citas_rango(desde: str, hasta: str) -> list[dict]:
