@@ -77,4 +77,5 @@ MENSAJES = {
     "cita_confirmada": "✅ Cita agendada:\n📋 {servicio}\n👩‍⚕️ {profesional}\n📅 {fecha} a las {hora}",
     "cita_cancelada": "❌ Cita del {fecha} a las {hora} cancelada.",
     "error": "No entendí tu respuesta. Por favor elige una opción válida.",
+    "error_interno": "🌸 Ups, algo salió mal de mi lado. Escribe *menu* para empezar de nuevo.",
 }

@@ -310,6 +310,10 @@ def _handle_modify_select(session, text):
     session["data"]["cita_seleccionada"] = cita
     servicios = db.get_servicios()
     serv = next((s for s in servicios if s["id"] == cita["servicio_id"]), None)
+    if serv is None:
+        session["state"] = IDLE
+        session["data"] = {}
+        return "No pude recuperar los datos de esa cita. Escribe *menu* para volver a empezar."
     session["data"]["servicio"] = serv
     session["data"]["profesional"] = {"id": cita["profesional_id"], "nombre": cita.get("profesional_nombre", "")}
     fechas = db.get_fechas_disponibles(cita["profesional_id"], serv["duracion_min"])
