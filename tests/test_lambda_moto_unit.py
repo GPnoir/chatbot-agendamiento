@@ -202,6 +202,67 @@ class TestDisponibilidad:
         domingo = _proximo_lunes() + timedelta(days=6)
         assert db.get_horas_disponibles(1, domingo, 30) == []
 
+    def test_duracion_decimal_no_revienta(self):
+        """DynamoDB devuelve números como Decimal; la duración del servicio
+        leída fresca de la tabla llega como Decimal. get_horas_disponibles debe
+        aceptarla sin lanzar TypeError en timedelta (bug de 'modificar cita')."""
+        from decimal import Decimal
+
+        horas = db.get_horas_disponibles(1, _proximo_lunes(), Decimal("60"))
+        assert "09:00" in horas
+        assert "17:00" in horas
+
+    def test_fechas_disponibles_acepta_decimal(self):
+        from decimal import Decimal
+
+        fechas = db.get_fechas_disponibles(1, Decimal("30"))
+        assert fechas  # hay al menos una fecha disponible esta semana
+
+
+# ---------------------------------------------------------------------------
+# Flujo "modificar cita" end-to-end (chatbot_lambda + DynamoDB moto)
+# ---------------------------------------------------------------------------
+
+class TestModificarFlujo:
+    """Regresión del bug: tras elegir la cita a modificar el bot se quedaba
+    pegado (TypeError swallowed) en vez de mostrar las nuevas fechas."""
+
+    def _crear_cita_futura(self, canal="telegram", uid="moto_modify"):
+        import chatbot_lambda  # noqa: F401  (asegura misma tabla via fixture)
+
+        cliente = db.get_or_create_cliente(canal, uid, "Paciente Modify")
+        lunes = _proximo_lunes()
+        servicios = db.get_servicios()
+        serv = next(s for s in servicios if "inicial" in s["nombre"].lower())
+        db.crear_cita(cliente["id"], serv["id"], 1, lunes.isoformat(), "10:00")
+        return canal, uid, lunes
+
+    def test_seleccionar_cita_avanza_a_fechas(self):
+        import chatbot_lambda as cb
+
+        canal, uid, _ = self._crear_cita_futura()
+        cb.handle_message(canal, uid, "menu")
+        cb.handle_message(canal, uid, "2")  # modificar
+        assert session_store.get_session(uid)["state"] == cb.MODIFY_SELECT
+
+        resp = cb.handle_message(canal, uid, "1")  # seleccionar la cita
+
+        assert "fechas" in resp.lower()
+        assert session_store.get_session(uid)["state"] == cb.MODIFY_DATE
+
+    def test_reagendar_completo(self):
+        import chatbot_lambda as cb
+
+        canal, uid, _ = self._crear_cita_futura(uid="moto_modify_full")
+        cb.handle_message(canal, uid, "menu")
+        cb.handle_message(canal, uid, "2")
+        cb.handle_message(canal, uid, "1")  # cita
+        cb.handle_message(canal, uid, "1")  # nueva fecha
+        cb.handle_message(canal, uid, "1")  # nueva hora
+        resp = cb.handle_message(canal, uid, "si")  # confirmar
+        assert "reagendada" in resp.lower()
+        assert session_store.get_session(uid)["state"] == cb.IDLE
+
 
 class TestBookingConfirmSlotOcupado:
     """Si el slot se ocupa entre que se muestran las horas y el usuario
@@ -357,6 +418,26 @@ class TestTelegramWebhookConMoto:
         )
         assert resp.status_code == 403
         assert sent == []
+
+    def test_error_interno_no_deja_pegado(self, lambda_app_client):
+        """Si el motor lanza una excepción inesperada, el webhook no debe dejar
+        al usuario sin respuesta: avisa con un mensaje y resetea la sesión."""
+        import lambda_handler
+
+        with patch.object(
+            lambda_handler.chatbot, "handle_message", side_effect=RuntimeError("boom")
+        ):
+            client, sent = lambda_app_client
+            resp = client.post(
+                "/telegram/webhook",
+                json=_telegram_update(424242, "2"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": TELEGRAM_SECRET},
+            )
+        assert resp.status_code == 200
+        assert len(sent) == 1  # el usuario recibió un aviso, no silencio
+        assert "menu" in sent[0]["text"].lower()
+        # la sesión queda en IDLE para poder reintentar
+        assert session_store.get_session("424242")["state"] == "IDLE"
 
 
 # ---------------------------------------------------------------------------
