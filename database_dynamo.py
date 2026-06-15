@@ -100,6 +100,10 @@ def get_or_create_cliente(canal: str, canal_user_id: str, nombre: str = None) ->
 def get_horas_disponibles(profesional_id: int, fecha: date, servicio_duracion: int) -> list[str]:
     """Retorna horas disponibles para un profesional en una fecha, validando solapamiento y bloqueos."""
     table = get_table()
+    # DynamoDB devuelve los números como Decimal: si la duración llega leída
+    # fresca de la tabla (p. ej. al reagendar), timedelta() la rechaza. La
+    # normalizamos a int para proteger a todos los llamadores.
+    servicio_duracion = int(servicio_duracion)
     dia_semana = fecha.weekday()
     fecha_str = fecha.isoformat()
 
