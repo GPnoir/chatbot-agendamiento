@@ -8,9 +8,11 @@
 Herramienta interna de agendamiento para un único negocio de terapia floral
 (flores de Bach). Dos superficies:
 
-1. **Portal admin** (`/admin/panel`) — uso diario de la terapeuta: ver la
-   agenda de la semana y revisar el reporte de citas. Es una herramienta de
-   trabajo: el diseño **sirve** al contenido, no es el producto.
+1. **Portal admin** (`/admin/panel`) — uso diario de la terapeuta. Login con
+   usuario y contraseña, menú hamburguesa con: agenda semanal interactiva (click
+   en una cita → detalle + cancelar), reporte de métricas, y fichas de pacientes
+   (histórico de citas + notas del terapeuta). Es una herramienta de trabajo: el
+   diseño **sirve** al contenido, no es el producto.
 2. **Chatbot** (Telegram + WhatsApp) — cara al cliente. El "diseño" es copy +
    estructura de mensajes + botones inline. Calmo, claro, humano.
 
