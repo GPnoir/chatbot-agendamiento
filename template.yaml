@@ -245,6 +245,21 @@ Resources:
           Properties:
             Schedule: rate(1 hour)
 
+  AttendancePromptFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: chatbot-attendance-prompt
+      Handler: attendance_prompt.handler
+      CodeUri: .
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ChatbotTable
+      Events:
+        HourlyCheck:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 hour)
+
   # ── Warm-up (evitar cold starts) ─────────────────────────────────
   WarmUpRule:
     Type: AWS::Events::Rule

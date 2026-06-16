@@ -16,7 +16,7 @@ import database_dynamo as db
 import session_store
 from config import (
     WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN,
-    WHATSAPP_APP_SECRET, TELEGRAM_WEBHOOK_SECRET, ADMIN_API_KEY,
+    WHATSAPP_APP_SECRET, TELEGRAM_WEBHOOK_SECRET, ADMIN_API_KEY, ADMIN_USER_ID,
     ADMIN_USERNAME, ADMIN_PASSWORD_HASH, SESSION_SECRET,
 )
 from rate_limiter import is_rate_limited
@@ -1159,6 +1159,34 @@ def _reset_user_session(user_id: str) -> None:
         logger.debug("no se pudo resetear la sesión tras un error")
 
 
+async def _handle_attendance_callback(cq: dict, data: str, chat_id) -> None:
+    """Marca el estado de una cita desde los botones del prompt de atención
+    (att|<estado>|<fecha>#<hora>#<prof>). Solo lo invoca la terapeuta."""
+    try:
+        _, estado, slot = data.split("|", 2)
+        fecha, hora, prof = slot.split("#")
+    except (ValueError, AttributeError):
+        return
+    if estado not in ("completada", "no_show"):
+        return
+    cita = db.buscar_cita_por_slot(prof, fecha, hora)
+    if not cita:
+        msg = "No encontré esa cita (puede haberse modificado)."
+    else:
+        try:
+            db.marcar_estado_cita(cita["PK"], cita["SK"], estado)
+            label = "✓ Realizada" if estado == "completada" else "✕ No asistió"
+            msg = f"Registrado: {label} — {fecha} {hora}."
+        except Exception as e:
+            logger.error("attendance callback: error", extra={"error": str(e)})
+            msg = "No se pudo registrar. Probá desde el panel."
+    orig = (cq.get("message") or {}).get("text", "")
+    try:
+        await _edit_telegram_message(chat_id, cq["message"]["message_id"], (orig + "\n\n" + msg).strip())
+    except Exception:
+        logger.debug("no se pudo editar el mensaje de atención")
+
+
 @app.get("/whatsapp/webhook")
 async def whatsapp_verify(request: Request):
     params = request.query_params
@@ -1253,6 +1281,13 @@ async def telegram_webhook(request: Request):
         if clean is None:
             # callback_data inválido u oversized solo puede ser un payload
             # forjado (los botones legítimos llevan datos cortos): se ignora
+            return {"status": "ok"}
+        # Prompt de atención post-cita: estos botones marcan el estado de la cita
+        # y SOLO los puede usar la terapeuta. No se enrutan a la conversación.
+        if clean.startswith("att|"):
+            await _answer_telegram_callback(cq["id"])
+            if user_id == str(ADMIN_USER_ID):
+                await _handle_attendance_callback(cq, clean, chat_id)
             return {"status": "ok"}
         # Registro de la elección: dejar el mensaje original mostrando la opción
         # tocada y sacarle el teclado (así no se pierde lo que el usuario eligió

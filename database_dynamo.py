@@ -427,6 +427,23 @@ def actualizar_tramo_cita(cita_pk: str, cita_sk: str, tramo: str) -> None:
 ESTADOS_ATENCION = ("confirmada", "completada", "no_show")
 
 
+def buscar_cita_por_slot(profesional_id, fecha: str, hora: str) -> Optional[dict]:
+    """Busca la cita de un slot (prof + fecha + hora) vía GSI1. Devuelve la no
+    cancelada si hay varias. Lo usa el prompt de atención para resolver el token
+    del botón a la cita real."""
+    table = get_table()
+    resp = table.query(
+        IndexName="GSI1",
+        KeyConditionExpression=Key("GSI1PK").eq(f"APPT#PROF#{profesional_id}")
+        & Key("GSI1SK").eq(f"DATE#{fecha}#{hora}"),
+    )
+    items = resp.get("Items", [])
+    for it in items:
+        if it.get("estado") != "cancelada":
+            return it
+    return items[0] if items else None
+
+
 def marcar_estado_cita(cita_pk: str, cita_sk: str, estado: str) -> None:
     """Marca el estado de atención de una cita (completada / no_show / confirmada).
 
