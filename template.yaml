@@ -223,6 +223,11 @@ Resources:
           Properties:
             Path: /admin/cliente/nota
             Method: post
+        AdminEnviarMensaje:
+          Type: Api
+          Properties:
+            Path: /admin/cliente/mensaje
+            Method: post
 
   # ── Reminder Lambda ────────────────────────────────────────────────
   ReminderFunction:
