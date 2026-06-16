@@ -71,14 +71,24 @@ class TestMensajeEndpoint:
         datas = {b["callback_data"] for row in markup["inline_keyboard"] for b in row}
         assert datas == {"2", "3"}             # reagendar / cancelar (menú del bot)
 
-    def test_envia_whatsapp_con_acciones_texto(self, admin_client):
+    def test_envia_whatsapp_con_acciones_botones(self, admin_client):
         import lambda_handler
         cli = db.get_or_create_cliente("whatsapp", "5491100000000", "Dani")
-        with patch.object(lambda_handler, "_send_whatsapp", new=AsyncMock()) as send:
+        with patch.object(lambda_handler, "_send_whatsapp_buttons", new=AsyncMock()) as send:
             r = admin_client.post("/admin/cliente/mensaje",
                                   json={"cliente_id": cli["id"], "texto": "Hola", "acciones": True},
                                   headers=AUTH)
         assert r.status_code == 200
         args, _ = send.call_args
         assert args[0] == "5491100000000"
-        assert "2" in args[1] and "3" in args[1]   # instrucción textual de acciones
+        ids = {bid for bid, _title in args[2]}
+        assert ids == {"2", "3"}   # botones interactivos = menú del bot
+
+    def test_envia_whatsapp_sin_acciones_texto_plano(self, admin_client):
+        import lambda_handler
+        cli = db.get_or_create_cliente("whatsapp", "5491100000001", "Eze")
+        with patch.object(lambda_handler, "_send_whatsapp", new=AsyncMock()) as send:
+            r = admin_client.post("/admin/cliente/mensaje",
+                                  json={"cliente_id": cli["id"], "texto": "Hola"}, headers=AUTH)
+        assert r.status_code == 200
+        send.assert_awaited_once()

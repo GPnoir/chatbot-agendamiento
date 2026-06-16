@@ -390,11 +390,12 @@ async def admin_enviar_mensaje(request: Request):
                     {"text": "❌ Cancelar", "callback_data": "3"},
                 ]]}
             await _send_telegram(int(destino), texto, reply_markup=markup)
-        else:  # whatsapp (texto plano; las acciones van como instrucción)
-            cuerpo = texto
+        else:  # whatsapp
             if acciones:
-                cuerpo += "\n\nRespondé *2* para reagendar o *3* para cancelar tu cita."
-            await _send_whatsapp(destino, cuerpo)
+                # Botones interactivos; el id vuelve por el webhook = menú del bot.
+                await _send_whatsapp_buttons(destino, texto, [("2", "Reagendar"), ("3", "Cancelar")])
+            else:
+                await _send_whatsapp(destino, texto)
     except Exception as e:
         logger.error("admin enviar mensaje: send error", extra={"error": str(e)})
         return JSONResponse(status_code=502, content={"error": "send failed"})
@@ -1119,6 +1120,28 @@ async def _send_whatsapp(to: str, text: str):
         await client.post(META_API_URL, json=payload, headers=headers)
 
 
+async def _send_whatsapp_buttons(to: str, text: str, buttons: list):
+    """Mensaje interactivo de WhatsApp con botones de respuesta.
+
+    buttons: lista de (id, título). El id vuelve en el webhook como
+    interactive.button_reply.id — reusamos "2"/"3" (el menú del bot). Título ≤20.
+    """
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    payload = {
+        "messaging_product": "whatsapp", "to": to, "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": text},
+            "action": {"buttons": [
+                {"type": "reply", "reply": {"id": bid, "title": title[:20]}}
+                for bid, title in buttons
+            ]},
+        },
+    }
+    async with httpx.AsyncClient() as client:
+        await client.post(META_API_URL, json=payload, headers=headers)
+
+
 async def _send_telegram(chat_id: int, text: str, reply_markup: dict | None = None):
     from config import TELEGRAM_BOT_TOKEN
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -1207,10 +1230,18 @@ async def whatsapp_message(request: Request):
         if not validate_whatsapp_payload(data):
             return {"status": "ok"}
         message = data["entry"][0]["changes"][0]["value"]["messages"][0]
-        if message["type"] != "text":
-            return {"status": "ok"}
         from_number = message["from"]
-        raw_text = message["text"]["body"]
+        mtype = message.get("type")
+        if mtype == "text":
+            raw_text = message["text"]["body"]
+        elif mtype == "interactive":
+            # Respuesta a botones interactivos: el id de la opción tocada se
+            # procesa como si el paciente hubiera escrito ese texto (p. ej. "2").
+            inter = message.get("interactive") or {}
+            reply = inter.get("button_reply") or inter.get("list_reply") or {}
+            raw_text = reply.get("id") or ""
+        else:
+            return {"status": "ok"}
     except (KeyError, IndexError, ValueError):
         return {"status": "ok"}
 
