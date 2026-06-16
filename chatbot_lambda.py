@@ -476,6 +476,9 @@ def _handle_admin_command(text: str) -> str | None:
             f"❌ Canceladas: {resumen['por_estado'].get('cancelada', 0)}",
             f"✔️ Completadas: {resumen['por_estado'].get('completada', 0)}",
             f"Tasa de cancelación: {resumen['tasa_cancelacion']:.0%}",
+            f"💰 Facturación: ${resumen.get('facturacion', 0):,.0f}".replace(",", "."),
+            f"👥 Pacientes nuevos: {resumen.get('pacientes_nuevos', 0)} · recurrentes: {resumen.get('pacientes_recurrentes', 0)}",
+            f"🗓 Ocupación: {resumen.get('ocupacion', 0):.0%} ({resumen.get('horas_ocupadas', 0)}/{resumen.get('horas_disponibles', 0)} h)",
         ]
         if resumen["por_servicio"]:
             lines.append("\nPor servicio:")
