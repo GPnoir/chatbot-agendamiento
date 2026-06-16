@@ -464,23 +464,74 @@ def get_citas_rango(desde: str, hasta: str) -> list[dict]:
     return sorted(items, key=lambda x: (x["fecha"], x["hora"]))
 
 
-def resumen_citas_rango(desde: str, hasta: str) -> dict:
-    """Agrega métricas de citas en un rango de fechas (issue #15).
+def _hhmm_a_min(hhmm: str) -> int:
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
 
-    Retorna: total, por_estado (estado → cantidad), por_servicio
-    (nombre → cantidad) y tasa_cancelacion (canceladas / total, 0.0 si
-    no hay citas).
+
+def _capacidad_min_rango(desde: str, hasta: str) -> int:
+    """Minutos de atención disponibles según HORARIOS_DEFAULT en el rango."""
+    d = date.fromisoformat(desde)
+    fin = date.fromisoformat(hasta)
+    total = 0
+    while d <= fin:
+        horario = HORARIOS_DEFAULT.get(d.weekday())
+        if horario:
+            total += max(0, _hhmm_a_min(horario["fin"]) - _hhmm_a_min(horario["inicio"]))
+        d += timedelta(days=1)
+    return total
+
+
+def resumen_citas_rango(desde: str, hasta: str) -> dict:
+    """Agrega métricas de negocio de citas en un rango (issues #15 + métricas).
+
+    Devuelve, además de los conteos base (total, por_estado, por_servicio,
+    tasa_cancelacion):
+    - tasa_no_show
+    - facturacion (suma de `precio` de las completadas) + ingresos_por_servicio
+    - pacientes_nuevos vs pacientes_recurrentes (primera cita histórica dentro
+      del rango = nuevo)
+    - horas_ocupadas vs horas_disponibles y ocupacion (0..1)
+    Solo las citas *completadas* cuentan como facturación.
     """
     citas = get_citas_rango(desde, hasta)
     por_estado: dict[str, int] = {}
     por_servicio: dict[str, int] = {}
+    ingresos_por_servicio: dict[str, int] = {}
+    facturacion = 0
+    ocupadas_min = 0
+    clientes: set = set()
     for c in citas:
         estado = c.get("estado", "desconocido")
         por_estado[estado] = por_estado.get(estado, 0) + 1
         servicio = c.get("servicio_nombre", "Sin servicio")
         por_servicio[servicio] = por_servicio.get(servicio, 0) + 1
+        if c.get("cliente_id"):
+            clientes.add(c["cliente_id"])
+        if estado != "cancelada":
+            ocupadas_min += int(c.get("servicio_duracion", 60) or 60)
+        if estado == "completada":
+            precio = int(c.get("precio", 0) or 0)
+            facturacion += precio
+            ingresos_por_servicio[servicio] = ingresos_por_servicio.get(servicio, 0) + precio
+
+    # Pacientes nuevos vs recurrentes: nuevo si su primera cita histórica
+    # (cualquier estado) cae dentro del rango.
+    nuevos = recurrentes = 0
+    for cid in clientes:
+        hist = get_historial_cliente(cid)
+        if not hist:
+            continue
+        primera = min(h["fecha"] for h in hist)
+        if primera >= desde:
+            nuevos += 1
+        else:
+            recurrentes += 1
+
     total = len(citas)
     canceladas = por_estado.get("cancelada", 0)
+    no_shows = por_estado.get("no_show", 0)
+    cap_min = _capacidad_min_rango(desde, hasta)
     return {
         "desde": desde,
         "hasta": hasta,
@@ -488,6 +539,14 @@ def resumen_citas_rango(desde: str, hasta: str) -> dict:
         "por_estado": por_estado,
         "por_servicio": por_servicio,
         "tasa_cancelacion": (canceladas / total) if total else 0.0,
+        "tasa_no_show": (no_shows / total) if total else 0.0,
+        "facturacion": facturacion,
+        "ingresos_por_servicio": ingresos_por_servicio,
+        "pacientes_nuevos": nuevos,
+        "pacientes_recurrentes": recurrentes,
+        "horas_ocupadas": round(ocupadas_min / 60, 1),
+        "horas_disponibles": round(cap_min / 60, 1),
+        "ocupacion": (ocupadas_min / cap_min) if cap_min else 0.0,
     }
 
 

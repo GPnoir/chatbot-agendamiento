@@ -541,8 +541,13 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 .stat dt{font:500 .76rem var(--font-ui);color:var(--ink-3);margin-bottom:4px}
 .stat dd{font:600 1.4rem var(--font-display);color:var(--ink);font-variant-numeric:tabular-nums}
 .dd-clay{color:var(--clay-ink)}
-.meter{height:6px;border-radius:999px;background:var(--surface-sunk);overflow:hidden;margin-top:18px}
+.meter{height:6px;border-radius:999px;background:var(--surface-sunk);overflow:hidden;margin-top:6px}
 .meter-fill{display:block;height:100%;width:0;background:var(--clay);border-radius:999px;transition:width .55s var(--ease)}
+.meter-fill.acc{background:var(--accent)}
+.rep-meters{display:flex;flex-direction:column;gap:14px;margin-top:18px}
+.meter-block{display:flex;flex-direction:column}
+.meter-label{font:500 .78rem var(--font-ui);color:var(--ink-3)}
+.rep-block+.rep-block{margin-top:20px}
 .rep-block{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:22px clamp(18px,3vw,28px)}
 .block-title{font:600 1.05rem var(--font-display);color:var(--ink);margin-bottom:16px;letter-spacing:-.01em}
 .bars{list-style:none;display:flex;flex-direction:column;gap:14px}
@@ -946,29 +951,47 @@ async function loadReporte(){
   if(!r.ok){rb.innerHTML="<p class='rep-error'>No se pudo cargar el reporte.</p>";return}
   renderReporte(await r.json());
 }
+function fmtCLP(n){return "$"+Number(n||0).toLocaleString("es-CL")}
 function renderReporte(data){
   var rb=$("rep-body");
   var total=data.total||0;
-  var conf=(data.por_estado&&data.por_estado.confirmada)||0;
-  var canc=(data.por_estado&&data.por_estado.cancelada)||0;
-  var tasa=Math.round((data.tasa_cancelacion||0)*100);
   if(total===0){
     rb.innerHTML="<div class='empty'>"+MARK(40)+"<p class='empty-title'>Sin citas en este período</p><p class='empty-sub'>Cuando se agenden citas en el rango elegido, el resumen va a aparecer acá.</p></div>";
     return;
   }
-  var servicios=Object.keys(data.por_servicio||{}).map(function(k){return [k,data.por_servicio[k]]});
-  servicios.sort(function(a,b){return b[1]-a[1]});
-  var maxC=servicios.reduce(function(mx,s){return Math.max(mx,s[1])},1);
+  var est=data.por_estado||{};
+  var conf=est.confirmada||0,canc=est.cancelada||0,comp=est.completada||0;
+  var tasaC=Math.round((data.tasa_cancelacion||0)*100);
+  var tasaNS=Math.round((data.tasa_no_show||0)*100);
+  var ocup=Math.round((data.ocupacion||0)*100);
   var h="<div class='rep-summary'>";
-  h+="<div class='lead'><span class='lead-num'>"+total+"</span><span class='lead-label'>"+(total===1?"cita en el período":"citas en el período")+"</span></div>";
-  h+="<dl class='statrow'><div class='stat'><dt>Confirmadas</dt><dd>"+conf+"</dd></div><div class='stat'><dt>Canceladas</dt><dd class='dd-clay'>"+canc+"</dd></div><div class='stat'><dt>Tasa de cancelación</dt><dd>"+tasa+"%</dd></div></dl>";
-  h+="<div class='meter' role='img' aria-label='Tasa de cancelación "+tasa+" por ciento'><span class='meter-fill' data-w='"+tasa+"%'></span></div></div>";
-  h+="<section class='rep-block'><h2 class='block-title'>Por servicio</h2><ul class='bars'>";
-  servicios.forEach(function(s){
-    var pct=Math.round(s[1]/maxC*100);
-    h+="<li class='bar-row'><span class='bar-name'>"+esc(s[0])+"</span><span class='bar-track'><span class='bar-fill' data-w='"+pct+"%'></span></span><span class='bar-val'>"+s[1]+"</span></li>";
-  });
-  h+="</ul></section>";
+  h+="<div class='lead'><span class='lead-num'>"+fmtCLP(data.facturacion)+"</span><span class='lead-label'>facturado · "+comp+" "+(comp===1?"cita realizada":"citas realizadas")+"</span></div>";
+  h+="<dl class='statrow'>";
+  h+="<div class='stat'><dt>Citas</dt><dd>"+total+"</dd></div>";
+  h+="<div class='stat'><dt>Realizadas</dt><dd>"+comp+"</dd></div>";
+  h+="<div class='stat'><dt>Confirmadas</dt><dd>"+conf+"</dd></div>";
+  h+="<div class='stat'><dt>Canceladas</dt><dd class='dd-clay'>"+canc+"</dd></div>";
+  h+="</dl>";
+  h+="<dl class='statrow'>";
+  h+="<div class='stat'><dt>Pacientes nuevos</dt><dd>"+(data.pacientes_nuevos||0)+"</dd></div>";
+  h+="<div class='stat'><dt>Recurrentes</dt><dd>"+(data.pacientes_recurrentes||0)+"</dd></div>";
+  h+="<div class='stat'><dt>Ocupación</dt><dd>"+ocup+"%</dd></div>";
+  h+="</dl>";
+  h+="<div class='rep-meters'>";
+  h+="<div class='meter-block'><span class='meter-label'>Ocupación · "+data.horas_ocupadas+" de "+data.horas_disponibles+" h</span><div class='meter' role='img' aria-label='Ocupación "+ocup+" por ciento'><span class='meter-fill acc' data-w='"+ocup+"%'></span></div></div>";
+  h+="<div class='meter-block'><span class='meter-label'>Tasa de cancelación · "+tasaC+"%</span><div class='meter' role='img' aria-label='Cancelación "+tasaC+" por ciento'><span class='meter-fill' data-w='"+tasaC+"%'></span></div></div>";
+  h+="<div class='meter-block'><span class='meter-label'>Tasa de no-show · "+tasaNS+"%</span><div class='meter' role='img' aria-label='No-show "+tasaNS+" por ciento'><span class='meter-fill' data-w='"+tasaNS+"%'></span></div></div>";
+  h+="</div></div>";
+  function bars(title,arr,fmt){
+    if(!arr.length){return ""}
+    var mx=arr.reduce(function(m,s){return Math.max(m,s[1])},1);
+    var b="<section class='rep-block'><h2 class='block-title'>"+title+"</h2><ul class='bars'>";
+    arr.forEach(function(s){var pct=Math.round(s[1]/mx*100);b+="<li class='bar-row'><span class='bar-name'>"+esc(s[0])+"</span><span class='bar-track'><span class='bar-fill' data-w='"+pct+"%'></span></span><span class='bar-val'>"+fmt(s[1])+"</span></li>"});
+    return b+"</ul></section>";
+  }
+  function toSorted(obj){return Object.keys(obj||{}).map(function(k){return [k,obj[k]]}).sort(function(a,b){return b[1]-a[1]})}
+  h+=bars("Ingresos por terapia",toSorted(data.ingresos_por_servicio),fmtCLP);
+  h+=bars("Citas por servicio",toSorted(data.por_servicio),function(v){return v});
   rb.innerHTML=h;
   requestAnimationFrame(function(){
     rb.querySelectorAll("[data-w]").forEach(function(el,i){el.style.transitionDelay=(i*55)+"ms";el.style.width=el.getAttribute("data-w")});
