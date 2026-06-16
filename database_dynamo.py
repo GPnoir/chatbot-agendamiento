@@ -421,6 +421,28 @@ def actualizar_tramo_cita(cita_pk: str, cita_sk: str, tramo: str) -> None:
                       UpdateExpression=update, ExpressionAttributeValues=values)
 
 
+# Estados que la terapeuta puede marcar desde el panel (validar la atención).
+# 'cancelada' NO está acá: tiene su propio camino (cancelar_cita) que libera el
+# slot y borra el evento del calendar.
+ESTADOS_ATENCION = ("confirmada", "completada", "no_show")
+
+
+def marcar_estado_cita(cita_pk: str, cita_sk: str, estado: str) -> None:
+    """Marca el estado de atención de una cita (completada / no_show / confirmada).
+
+    Lo usa el panel para registrar si la sesión se realizó. Lanza ValueError si
+    el estado no es uno de los permitidos (para cancelar, usar cancelar_cita).
+    """
+    if estado not in ESTADOS_ATENCION:
+        raise ValueError(f"Estado inválido: {estado}")
+    table = get_table()
+    table.update_item(
+        Key={"PK": cita_pk, "SK": cita_sk},
+        UpdateExpression="SET estado = :e, updated_at = :u",
+        ExpressionAttributeValues={":e": estado, ":u": datetime.utcnow().isoformat()},
+    )
+
+
 def get_citas_rango(desde: str, hasta: str) -> list[dict]:
     """Retorna todas las citas (cualquier estado) con fecha entre desde y hasta.
 

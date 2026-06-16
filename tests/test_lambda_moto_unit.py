@@ -107,6 +107,37 @@ class TestCitas:
         assert activas[0]["hora"] == "12:00"
 
 
+class TestMarcarEstado:
+    """Validar atención: la terapeuta marca la cita realizada / no asistió."""
+
+    def _cita(self, uid="estado_u", hora="10:00"):
+        cliente = db.get_or_create_cliente("telegram", uid, "Pac")
+        return db.crear_cita(cliente["id"], 1, 1, _proximo_lunes().isoformat(), hora)
+
+    def test_marcar_completada(self):
+        cita = self._cita()
+        db.marcar_estado_cita(cita["PK"], cita["SK"], "completada")
+        item = db.get_table().get_item(Key={"PK": cita["PK"], "SK": cita["SK"]})["Item"]
+        assert item["estado"] == "completada"
+
+    def test_marcar_no_show(self):
+        cita = self._cita(uid="estado_ns", hora="11:00")
+        db.marcar_estado_cita(cita["PK"], cita["SK"], "no_show")
+        item = db.get_table().get_item(Key={"PK": cita["PK"], "SK": cita["SK"]})["Item"]
+        assert item["estado"] == "no_show"
+
+    def test_estado_invalido_rechazado(self):
+        cita = self._cita(uid="estado_bad", hora="12:00")
+        with pytest.raises(ValueError):
+            db.marcar_estado_cita(cita["PK"], cita["SK"], "lo_que_sea")
+
+    def test_no_cancela_por_esta_via(self):
+        # Cancelar tiene su propio camino (libera el slot, borra del calendar).
+        cita = self._cita(uid="estado_nocancel", hora="13:00")
+        with pytest.raises(ValueError):
+            db.marcar_estado_cita(cita["PK"], cita["SK"], "cancelada")
+
+
 class TestPreciosCita:
     """Cada cita guarda un snapshot del tramo y el precio (issue precios)."""
 

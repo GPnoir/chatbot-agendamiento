@@ -148,9 +148,11 @@ async def admin_agenda(
     table = db.get_table()
     all_citas = []
     for f in fechas:
+        # Incluye confirmada/completada/no_show (la terapeuta ve qué pasó cada
+        # día); solo se ocultan las canceladas.
         resp = table.scan(
-            FilterExpression="begins_with(PK, :p) AND fecha = :f AND estado = :e",
-            ExpressionAttributeValues={":p": "APPOINTMENT#", ":f": f, ":e": "confirmada"},
+            FilterExpression="begins_with(PK, :p) AND fecha = :f AND estado <> :c",
+            ExpressionAttributeValues={":p": "APPOINTMENT#", ":f": f, ":c": "cancelada"},
         )
         all_citas.extend(resp["Items"])
 
@@ -222,6 +224,68 @@ async def admin_cancelar_cita(request: Request):
 
     db.cancelar_cita(pk, sk)
     return {"status": "ok"}
+
+
+def _validar_cita_existente(body):
+    """Valida {pk, sk} de un body admin: que sean strings con forma de cita y
+    que la cita exista. Retorna (pk, sk, error_response) — error_response es
+    None si todo OK."""
+    pk = body.get("pk") if isinstance(body, dict) else None
+    sk = body.get("sk") if isinstance(body, dict) else None
+    if (not isinstance(pk, str) or not isinstance(sk, str)
+            or not pk.startswith("APPOINTMENT#") or not sk.startswith("DATE#")):
+        return None, None, JSONResponse(status_code=400, content={"error": "invalid appointment id"})
+    if not db.get_table().get_item(Key={"PK": pk, "SK": sk}).get("Item"):
+        return None, None, JSONResponse(status_code=404, content={"error": "not found"})
+    return pk, sk, None
+
+
+@app.post("/admin/cita/estado")
+async def admin_marcar_estado(request: Request):
+    """Marca la atención de una cita: completada / no_show (o vuelve a confirmada).
+
+    Body: {pk, sk, estado}. Requiere auth y valida que la clave sea una cita.
+    """
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return JSONResponse(status_code=400, content={"error": "invalid json"})
+    pk, sk, err = _validar_cita_existente(body)
+    if err:
+        return err
+    try:
+        db.marcar_estado_cita(pk, sk, body.get("estado"))
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "invalid estado"})
+    return {"status": "ok", "estado": body.get("estado")}
+
+
+@app.post("/admin/cita/tramo")
+async def admin_asignar_tramo(request: Request):
+    """Asigna el tramo de precio (categoría del paciente) y recalcula el precio.
+
+    Body: {pk, sk, tramo}. Requiere auth y valida que la clave sea una cita.
+    """
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return JSONResponse(status_code=400, content={"error": "invalid json"})
+    pk, sk, err = _validar_cita_existente(body)
+    if err:
+        return err
+    try:
+        db.actualizar_tramo_cita(pk, sk, body.get("tramo"))
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "invalid tramo"})
+    from decimal import Decimal
+    item = db.get_table().get_item(Key={"PK": pk, "SK": sk}).get("Item", {})
+    precio = item.get("precio")
+    return {"status": "ok", "tramo": body.get("tramo"),
+            "precio": int(precio) if isinstance(precio, Decimal) else precio}
 
 
 # ── Fichas de pacientes ───────────────────────────────────────────────
@@ -367,8 +431,13 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 .detail-fields>div{display:flex;justify-content:space-between;gap:16px;padding:11px 0;border-bottom:1px solid var(--line)}
 .detail-fields dt{font:500 .82rem var(--font-ui);color:var(--ink-3)}
 .detail-fields dd{font:500 .9rem var(--font-ui);color:var(--ink);text-align:right}
-.detail-actions{margin-top:auto;display:flex;flex-direction:column;gap:8px}
+.detail-actions{margin-top:auto;display:flex;flex-direction:column;gap:12px}
 .confirm-row{display:flex;gap:8px}.confirm-row button{flex:1}
+.detail-group{display:flex;flex-direction:column;gap:6px}
+.detail-glabel{font:500 .82rem var(--font-ui);color:var(--ink-3)}
+.detail-select{appearance:none;width:100%;border:1px solid var(--line);background:var(--surface);color:var(--ink);font:500 .9rem var(--font-ui);padding:10px;border-radius:var(--r-sm);cursor:pointer}
+.detail-select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.btn-ghost.is-active{border-color:var(--accent);background:var(--accent-tint);color:var(--accent-strong)}
 .btn-danger{appearance:none;border:1px solid color-mix(in oklch,var(--clay) 40%,transparent);background:var(--clay-tint);color:var(--clay-ink);font:600 .9rem var(--font-ui);padding:11px;border-radius:var(--r-sm);cursor:pointer;transition:background .15s var(--ease)}
 .btn-danger:hover{background:color-mix(in oklch,var(--clay-tint) 65%,var(--clay))}
 .btn-ghost{appearance:none;border:1px solid var(--line);background:var(--surface);color:var(--ink-2);font:600 .9rem var(--font-ui);padding:11px;border-radius:var(--r-sm);cursor:pointer;transition:border-color .15s var(--ease),color .15s var(--ease)}
@@ -452,6 +521,12 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 .cita .contacto{font:500 .68rem var(--font-ui);color:var(--ink-3)}
 .cita.cita-cancel{background:var(--clay-tint)}
 .cita.cita-cancel .cita-dot{background:var(--clay)}
+.cita.cita-done .cita-dot{background:var(--accent-strong)}
+.cita.cita-noshow{background:var(--clay-tint)}
+.cita.cita-noshow .cita-dot{background:var(--clay)}
+.cita-mark{flex:none;align-self:flex-start;margin-top:3px;font:700 .72rem var(--font-ui);line-height:1}
+.cita-mark.done{color:var(--accent-strong)}
+.cita-mark.noshow{color:var(--clay-ink)}
 
 /* reporte */
 .rep-rango{font:500 .85rem var(--font-ui);color:var(--ink-3);margin:-8px 0 18px}
@@ -653,9 +728,18 @@ function toggleNav(){if($("nav-drawer").hidden){openNav()}else{closeNav()}}
 function navTo(view){closeNav();switchView(view)}
 
 /* panel de detalle de cita (agenda) */
+var TRAMO_LBL={adulto:"Adulto particular",nino:"Niño particular",convenio_tea:"Convenio TEA/TDAH"};
+var ESTADO_LBL={confirmada:"Confirmada",completada:"Realizada",no_show:"No asistió"};
+function fmtPrecio(p){if(p==null||p==="")return "—";return "$"+Number(p).toLocaleString("es-CL")}
 function openDetail(id){
   var c=(window._citas||{})[id];if(!c){return}
   window._detailCita=c;
+  renderDetailFields();
+  detailActions();
+  $("detail-backdrop").hidden=false;$("detail-panel").hidden=false;
+}
+function renderDetailFields(){
+  var c=window._detailCita;if(!c){return}
   var dias=["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
   var d=new Date(c.fecha+"T00:00:00");
   var contacto=c.cliente_canal==="telegram"?"Telegram @"+c.cliente_contacto:c.cliente_canal==="whatsapp"?"WhatsApp +"+c.cliente_contacto:(c.cliente_contacto||"—");
@@ -666,11 +750,49 @@ function openDetail(id){
     row("Profesional",c.profesional_nombre||"—")+
     row("Fecha",dias[d.getDay()]+" "+fmtCorto(d))+
     row("Hora",c.hora)+
+    row("Estado",ESTADO_LBL[c.estado]||c.estado||"Confirmada")+
+    row("Categoría",TRAMO_LBL[c.tramo]||"Adulto particular")+
+    row("Precio",fmtPrecio(c.precio))+
     row("Contacto",contacto);
-  detailActions();
-  $("detail-backdrop").hidden=false;$("detail-panel").hidden=false;
 }
-function detailActions(){$("detail-actions").innerHTML="<button class='btn-danger' onclick='askCancel()'>Cancelar cita</button>"}
+function detailActions(){
+  var c=window._detailCita;if(!c){return}
+  var est=c.estado||"confirmada";
+  var h="<div class='detail-group'><span class='detail-glabel'>¿Se realizó la atención?</span><div class='confirm-row'>";
+  h+="<button class='btn-ghost"+(est==="completada"?" is-active":"")+"' onclick=\"setEstado('completada')\">Realizada</button>";
+  h+="<button class='btn-ghost"+(est==="no_show"?" is-active":"")+"' onclick=\"setEstado('no_show')\">No asistió</button>";
+  h+="</div></div>";
+  h+="<div class='detail-group'><span class='detail-glabel'>Categoría del paciente (precio)</span>";
+  h+="<select class='detail-select' onchange='setTramo(this.value)'>";
+  ["adulto","nino","convenio_tea"].forEach(function(t){h+="<option value='"+t+"'"+((c.tramo||"adulto")===t?" selected":"")+">"+TRAMO_LBL[t]+"</option>"});
+  h+="</select></div>";
+  h+="<button class='btn-danger' onclick='askCancel()'>Cancelar cita</button>";
+  h+="<p class='detail-msg' id='detail-fb' hidden></p>";
+  $("detail-actions").innerHTML=h;
+}
+function _detailFb(msg,cls){var e=$("detail-fb");if(!e){return}e.hidden=false;e.textContent=msg;e.className="detail-msg"+(cls?" "+cls:"")}
+async function setEstado(estado){
+  var c=window._detailCita;if(!c){return}
+  _detailFb("Guardando…");
+  var r;
+  try{r=await fetch(base()+"/admin/cita/estado",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},body:JSON.stringify({pk:c.pk,sk:c.sk,estado:estado})})}
+  catch(e){_detailFb("No se pudo guardar. Reintentá.","err");return}
+  if(r.status===401||r.status===403){onAuthLost();return}
+  if(!r.ok){_detailFb("No se pudo guardar.","err");return}
+  c.estado=estado;renderDetailFields();detailActions();_detailFb("Guardado.","ok");renderAgenda();
+}
+async function setTramo(tramo){
+  var c=window._detailCita;if(!c){return}
+  _detailFb("Guardando…");
+  var r;
+  try{r=await fetch(base()+"/admin/cita/tramo",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},body:JSON.stringify({pk:c.pk,sk:c.sk,tramo:tramo})})}
+  catch(e){_detailFb("No se pudo guardar. Reintentá.","err");return}
+  if(r.status===401||r.status===403){onAuthLost();return}
+  if(!r.ok){_detailFb("No se pudo guardar.","err");return}
+  var data=await r.json().catch(function(){return{}});
+  c.tramo=tramo;if(data&&data.precio!=null){c.precio=data.precio}
+  renderDetailFields();_detailFb("Guardado.","ok");renderAgenda();
+}
 function askCancel(){$("detail-actions").innerHTML="<p class='detail-msg'>¿Seguro que querés cancelar esta cita?</p><div class='confirm-row'><button class='btn-danger' onclick='doCancel()'>Sí, cancelar</button><button class='btn-ghost' onclick='detailActions()'>No</button></div>"}
 async function doCancel(){
   var c=window._detailCita;if(!c){return}
@@ -794,8 +916,9 @@ async function renderAgenda(){
         html+="<div class='cal-cell"+t+"'>";
         citas.forEach(function(c){
           var contacto=c.cliente_canal==="telegram"?"Telegram @"+c.cliente_contacto:c.cliente_canal==="whatsapp"?"WhatsApp +"+c.cliente_contacto:(c.cliente_contacto||"");
-          var cancel=c.estado==="cancelada"?" cita-cancel":"";
-          html+="<div class='cita"+cancel+"' onclick='openDetail("+c._id+")'><span class='cita-dot'></span><div class='cita-body'><div class='nombre'>"+esc(c.cliente_nombre||"Sin nombre")+"</div><div class='servicio'>"+esc(c.servicio_nombre||"Consulta")+" · "+esc(String(c.servicio_duracion||60))+" min</div><div class='contacto'>"+esc(contacto)+"</div></div></div>";
+          var estCls=c.estado==="completada"?" cita-done":c.estado==="no_show"?" cita-noshow":c.estado==="cancelada"?" cita-cancel":"";
+          var mark=c.estado==="completada"?"<span class='cita-mark done' title='Realizada'>✓</span>":c.estado==="no_show"?"<span class='cita-mark noshow' title='No asistió'>✕</span>":"";
+          html+="<div class='cita"+estCls+"' onclick='openDetail("+c._id+")'><span class='cita-dot'></span><div class='cita-body'><div class='nombre'>"+esc(c.cliente_nombre||"Sin nombre")+"</div><div class='servicio'>"+esc(c.servicio_nombre||"Consulta")+" · "+esc(String(c.servicio_duracion||60))+" min</div><div class='contacto'>"+esc(contacto)+"</div></div>"+mark+"</div>";
         });
         html+="</div>";
       });
