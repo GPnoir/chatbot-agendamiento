@@ -144,8 +144,9 @@ Antes de tocar UI, leerlos. Aplica a:
     marcar realizada / no asistió, asignar tramo de precio, o cancelar). Muestra
     confirmadas + atendidas (✓ realizada, ✕ no-show); oculta canceladas.
   - **Reporte** (dashboard de métricas sobre `/admin/reporte`).
-  - **Fichas** de pacientes (lista + buscador → ficha con histórico de citas y
-    notas del terapeuta).
+  - **Fichas** de pacientes (lista + buscador → ficha con histórico de citas,
+    notas del terapeuta y **contacto**: link wa.me para WhatsApp y envío de
+    mensaje vía el bot, con botones opcionales de reagendar/cancelar).
   - **Cerrar sesión**.
 
   El shell NO embebe datos ni secretos (contrato cubierto en
@@ -153,7 +154,7 @@ Antes de tocar UI, leerlos. Aplica a:
   declarado como ruta `Api` en template.yaml** o API Gateway responde 403 en prod):
   `/admin/login`, `/admin/agenda`, `/admin/reporte`, `/admin/cita/cancelar`,
   `/admin/cita/estado`, `/admin/cita/tramo`, `/admin/clientes`, `/admin/cliente`,
-  `/admin/cliente/nota`.
+  `/admin/cliente/nota`, `/admin/cliente/mensaje`.
 - **Chatbot**: la "UI" es copy + estructura de mensajes (config.MENSAJES) +
   botones inline (telegram_ui.py). `build_message` arma texto+teclado **sin
   duplicar** las opciones numeradas; al tocar un botón el mensaje se edita para

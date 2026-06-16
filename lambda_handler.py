@@ -351,6 +351,56 @@ async def admin_agregar_nota(request: Request):
     return {"status": "ok", "nota": {"texto": nota["texto"], "created_at": nota["created_at"]}}
 
 
+@app.post("/admin/cliente/mensaje")
+async def admin_enviar_mensaje(request: Request):
+    """Envía un mensaje al paciente por el bot, opcional con botones para que él
+    reagende/cancele su cita. Body: {cliente_id, texto, acciones?}.
+
+    Seguridad: el destino NUNCA viene del body — se resuelve el canal y el
+    canal_user_id del cliente almacenado (regla #4). Sanitiza y limita el texto.
+    """
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return JSONResponse(status_code=400, content={"error": "invalid json"})
+    cliente_id = body.get("cliente_id") if isinstance(body, dict) else None
+    texto = body.get("texto") if isinstance(body, dict) else None
+    acciones = bool(body.get("acciones")) if isinstance(body, dict) else False
+    if not isinstance(cliente_id, str) or not isinstance(texto, str):
+        return JSONResponse(status_code=400, content={"error": "missing fields"})
+    texto = sanitize_text(texto)
+    if not texto or len(texto) > 1000:
+        return JSONResponse(status_code=400, content={"error": "invalid message text"})
+    cliente = db.get_cliente(cliente_id)
+    if not cliente:
+        return JSONResponse(status_code=404, content={"error": "client not found"})
+    canal = cliente.get("canal")
+    destino = cliente.get("canal_user_id")
+    if not destino or canal not in ("telegram", "whatsapp"):
+        return JSONResponse(status_code=400, content={"error": "client has no reachable channel"})
+    try:
+        if canal == "telegram":
+            # Los botones reusan el menú del bot: callback 2 = reagendar, 3 = cancelar.
+            markup = None
+            if acciones:
+                markup = {"inline_keyboard": [[
+                    {"text": "🔄 Reagendar", "callback_data": "2"},
+                    {"text": "❌ Cancelar", "callback_data": "3"},
+                ]]}
+            await _send_telegram(int(destino), texto, reply_markup=markup)
+        else:  # whatsapp (texto plano; las acciones van como instrucción)
+            cuerpo = texto
+            if acciones:
+                cuerpo += "\n\nRespondé *2* para reagendar o *3* para cancelar tu cita."
+            await _send_whatsapp(destino, cuerpo)
+    except Exception as e:
+        logger.error("admin enviar mensaje: send error", extra={"error": str(e)})
+        return JSONResponse(status_code=502, content={"error": "send failed"})
+    return {"status": "ok"}
+
+
 @app.get("/admin/panel")
 async def admin_panel():
     """Panel admin — login shell, sin datos de citas embebidos.
@@ -472,6 +522,13 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 .hist-text{display:flex;justify-content:space-between;gap:12px;flex:1;min-width:0;flex-wrap:wrap}
 .hist-serv{font:500 .9rem var(--font-ui);color:var(--ink)}
 .hist-when{font:500 .85rem var(--font-ui);color:var(--ink-3);font-variant-numeric:tabular-nums}
+.btn-contacto{display:inline-flex;align-items:center;gap:8px;text-decoration:none;border:1px solid var(--line);background:var(--surface);color:var(--ink);font:600 .9rem var(--font-ui);padding:10px 14px;border-radius:var(--r-sm);margin-bottom:12px;transition:border-color .15s var(--ease),color .15s var(--ease)}
+.btn-contacto:hover{border-color:var(--accent);color:var(--accent-strong)}
+.contacto-nota{font:400 .85rem/1.5 var(--font-ui);color:var(--ink-3);margin:0 0 12px}
+.msg-acciones{display:flex;align-items:center;gap:8px;font:500 .85rem var(--font-ui);color:var(--ink-2)}
+.msg-fb{font:500 .85rem var(--font-ui);padding:8px 10px;border-radius:var(--r-sm);text-align:center;color:var(--ink-2)}
+.msg-fb.ok{background:var(--accent-tint);color:var(--accent-strong)}
+.msg-fb.err{background:var(--clay-tint);color:var(--clay-ink)}
 .nota-form{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
 .nota-form textarea{width:100%;padding:10px 12px;border:1px solid var(--line-2);border-radius:var(--r-sm);font:400 .92rem var(--font-ui);color:var(--ink);background:var(--surface);resize:vertical;min-height:64px}
 .nota-form textarea:focus-visible{outline:2px solid var(--focus);outline-offset:1px;border-color:var(--accent)}
@@ -868,6 +925,13 @@ function renderFicha(data){
   var estIcon={confirmada:"✅",cancelada:"❌",completada:"✔️"};
   var h="<button class='btn-ghost ficha-back' onclick='loadFichas()'>‹ Volver a la lista</button>";
   h+="<div class='ficha-card'><div class='ficha-hd'><span class='ficha-avatar lg'>"+esc(iniciales(c.nombre))+"</span><div><div class='ficha-h-name'>"+esc(c.nombre||"Sin nombre")+"</div><div class='ficha-h-sub'>"+esc(sub)+"</div></div></div></div>";
+  h+="<section class='ficha-block'><h2 class='block-title'>Contacto</h2>";
+  if(c.canal==="whatsapp"){var num=(""+(c.canal_user_id||"")).replace(/[^0-9]/g,"");if(num){h+="<a class='btn-contacto' href='https://wa.me/"+num+"' target='_blank' rel='noopener'>Abrir WhatsApp con "+esc(c.nombre||"el paciente")+"</a>"}}
+  else if(c.canal==="telegram"){h+="<p class='contacto-nota'>Telegram no permite abrir el chat desde acá; mandale el mensaje por el bot.</p>"}
+  h+="<div class='nota-form msg-form'><textarea id='msg-texto' rows='3' maxlength='1000' placeholder='Mensaje para "+esc(c.nombre||"el paciente")+"…'></textarea>";
+  h+="<label class='msg-acciones'><input type='checkbox' id='msg-acciones'> Incluir botones para reagendar / cancelar su cita</label>";
+  h+="<button class='btn-accent' id='msg-btn' onclick='enviarMensaje()'>Enviar por el bot</button>";
+  h+="<p class='msg-fb' id='msg-fb' hidden></p></div></section>";
   h+="<section class='ficha-block'><h2 class='block-title'>Historial de citas</h2>";
   if(!hist.length){h+="<p class='ficha-empty'>Sin citas registradas.</p>"}
   else{h+="<ul class='ficha-hist'>";hist.forEach(function(a){h+="<li><span class='hist-est'>"+(estIcon[a.estado]||"")+"</span><span class='hist-text'><span class='hist-serv'>"+esc(a.servicio_nombre||"Consulta")+"</span><span class='hist-when'>"+esc(a.fecha)+" · "+esc(a.hora)+"</span></span></li>"});h+="</ul>"}
@@ -893,6 +957,20 @@ async function addNota(){
   if(r.status===401||r.status===403){onAuthLost();return}
   if(r.ok){fetchFicha(window._fichaId)}
   else{btn.disabled=false;btn.textContent="Agregar nota"}
+}
+function _msgFb(m,cls){var e=$("msg-fb");if(!e){return}e.hidden=false;e.textContent=m;e.className="msg-fb"+(cls?" "+cls:"")}
+async function enviarMensaje(){
+  var ta=$("msg-texto");if(!ta){return}
+  var texto=(ta.value||"").trim();if(!texto){_msgFb("Escribí un mensaje primero.","err");return}
+  var acciones=!!($("msg-acciones")&&$("msg-acciones").checked);
+  var btn=$("msg-btn");btn.disabled=true;btn.textContent="Enviando…";
+  var r;
+  try{r=await fetch(base()+"/admin/cliente/mensaje",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},body:JSON.stringify({cliente_id:window._fichaId,texto:texto,acciones:acciones})})}
+  catch(e){btn.disabled=false;btn.textContent="Enviar por el bot";_msgFb("No se pudo enviar. Reintentá.","err");return}
+  if(r.status===401||r.status===403){onAuthLost();return}
+  btn.disabled=false;btn.textContent="Enviar por el bot";
+  if(r.ok){ta.value="";if($("msg-acciones"))$("msg-acciones").checked=false;_msgFb("Mensaje enviado.","ok")}
+  else{_msgFb("No se pudo enviar.","err")}
 }
 function semana(dir){offset+=dir;renderAgenda()}
 
