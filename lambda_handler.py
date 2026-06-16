@@ -13,6 +13,7 @@ from mangum import Mangum
 import admin_auth
 import chatbot_lambda as chatbot
 import database_dynamo as db
+import session_store
 from config import (
     WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN,
     WHATSAPP_APP_SECRET, TELEGRAM_WEBHOOK_SECRET, ADMIN_API_KEY,
@@ -990,6 +991,14 @@ async def telegram_webhook(request: Request):
         logger.warning("telegram webhook rejected: secret mismatch")
         return JSONResponse(status_code=403, content={"error": "forbidden"})
     data = await request.json()
+
+    # Idempotencia: Telegram reenvía el mismo update_id si tardamos en responder
+    # 200. Descartamos el reintento para no duplicar respuestas ni efectos
+    # (notificaciones, etc.). Cubre tanto mensajes como callbacks de botones.
+    update_id = data.get("update_id") if isinstance(data, dict) else None
+    if update_id is not None and session_store.seen_update(update_id):
+        logger.debug("telegram webhook: update_id repetido, ignorado")
+        return {"status": "ok"}
 
     # Updates de botones inline (callback_query): el callback_data del botón
     # se procesa igual que texto del usuario — misma sanitización y rate limit.

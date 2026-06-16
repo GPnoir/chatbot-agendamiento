@@ -9,6 +9,7 @@ from boto3.dynamodb.conditions import Key
 
 TABLE_NAME = os.getenv("DYNAMODB_TABLE", "chatbot-agendamiento")
 SESSION_TTL_SECONDS = 600  # 10 minutos
+UPDATE_DEDUP_TTL_SECONDS = 3600  # 1h: cubre de sobra los reintentos de Telegram
 
 _table = None
 
@@ -67,3 +68,28 @@ def save_session(user_id: str, session: dict):
 def clear_session(user_id: str):
     table = _get_table()
     table.delete_item(Key={"PK": "SESSION", "SK": f"USER#{user_id}"})
+
+
+def seen_update(update_id) -> bool:
+    """Marca un update de webhook como procesado (idempotencia ante reintentos).
+
+    Telegram reenvía el mismo update_id si el webhook tarda en responder 200.
+    Usa una escritura condicional: retorna False si el update es nuevo (y lo
+    registra), True si ya estaba procesado (debe ignorarse). El registro expira
+    por TTL. Ante cualquier fallo del backend, retorna False (mejor reprocesar
+    que perder un mensaje legítimo)."""
+    table = _get_table()
+    try:
+        table.put_item(
+            Item={
+                "PK": "TGUPDATE",
+                "SK": f"ID#{update_id}",
+                "ttl": int(time.time()) + UPDATE_DEDUP_TTL_SECONDS,
+            },
+            ConditionExpression="attribute_not_exists(PK)",
+        )
+        return False
+    except table.meta.client.exceptions.ConditionalCheckFailedException:
+        return True
+    except Exception:
+        return False

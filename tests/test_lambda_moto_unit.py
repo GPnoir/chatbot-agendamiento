@@ -4,6 +4,7 @@ Cubre database_dynamo (CRUD, disponibilidad, bloqueos), session_store
 (roundtrip, TTL), y el webhook de Telegram de lambda_handler de punta a punta
 usando la tabla moto provista por el fixture autouse dynamo_mock_table.
 """
+import itertools
 import json
 import time
 from datetime import date, timedelta
@@ -391,6 +392,11 @@ class TestSessionStore:
         session_store.clear_session("moto_session_clear")
         assert session_store.get_session("moto_session_clear")["state"] == "IDLE"
 
+    def test_seen_update_marca_y_detecta_repetido(self):
+        assert session_store.seen_update(98765) is False  # primera vez: nuevo
+        assert session_store.seen_update(98765) is True   # repetido
+        assert session_store.seen_update(98766) is False  # otro id: nuevo
+
 
 # ---------------------------------------------------------------------------
 # lambda_handler: webhook Telegram end-to-end contra moto
@@ -414,11 +420,18 @@ def lambda_app_client():
             yield client, sent
 
 
-def _telegram_update(user_id: int, text: str) -> dict:
+_update_seq = itertools.count(1000)
+
+
+def _telegram_update(user_id: int, text: str, update_id: int = None) -> dict:
+    # update_id único por defecto: el webhook ahora deduplica reintentos por
+    # update_id, así que reusar el mismo id dentro de un test descartaría el 2º.
+    if update_id is None:
+        update_id = next(_update_seq)
     return {
-        "update_id": 1,
+        "update_id": update_id,
         "message": {
-            "message_id": 1,
+            "message_id": update_id,
             "from": {"id": user_id, "is_bot": False, "first_name": "Test"},
             "chat": {"id": user_id, "type": "private"},
             "date": int(time.time()),
@@ -490,6 +503,27 @@ class TestTelegramWebhookConMoto:
         assert "menu" in sent[0]["text"].lower()
         # la sesión queda en IDLE para poder reintentar
         assert session_store.get_session("424242")["state"] == "IDLE"
+
+
+class TestWebhookIdempotencia:
+    """Telegram reintenta el mismo update_id si el webhook tarda en responder.
+    El segundo no debe procesarse de nuevo (ni duplicar respuestas/efectos)."""
+
+    def test_update_repetido_se_ignora(self, lambda_app_client):
+        client, sent = lambda_app_client
+        headers = {"X-Telegram-Bot-Api-Secret-Token": TELEGRAM_SECRET}
+        update = _telegram_update(515151, "menu", update_id=4242)
+        r1 = client.post("/telegram/webhook", json=update, headers=headers)
+        r2 = client.post("/telegram/webhook", json=update, headers=headers)  # reintento
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert len(sent) == 1  # solo la primera entrega produjo respuesta
+
+    def test_updates_distintos_se_procesan(self, lambda_app_client):
+        client, sent = lambda_app_client
+        headers = {"X-Telegram-Bot-Api-Secret-Token": TELEGRAM_SECRET}
+        client.post("/telegram/webhook", json=_telegram_update(525252, "menu", update_id=11), headers=headers)
+        client.post("/telegram/webhook", json=_telegram_update(525252, "menu", update_id=12), headers=headers)
+        assert len(sent) == 2
 
 
 # ---------------------------------------------------------------------------
