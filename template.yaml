@@ -198,6 +198,16 @@ Resources:
           Properties:
             Path: /admin/cita/cancelar
             Method: post
+        AdminMarcarEstado:
+          Type: Api
+          Properties:
+            Path: /admin/cita/estado
+            Method: post
+        AdminAsignarTramo:
+          Type: Api
+          Properties:
+            Path: /admin/cita/tramo
+            Method: post
         AdminClientes:
           Type: Api
           Properties:
