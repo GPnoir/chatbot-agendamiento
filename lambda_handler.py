@@ -578,11 +578,18 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 @keyframes sk{from{background-position:200% 0}to{background-position:-200% 0}}
 @media(max-width:768px){
-  .calendar{grid-template-columns:42px repeat(var(--days),1fr)}
   .cal-head,.cal-hour{font-size:.62rem}
-  .cita .nombre{font-size:.66rem}.cita .servicio,.cita .contacto{display:none}
+  .cita .servicio,.cita .contacto{display:none}
   .brand-sub{display:none}
   .stat{padding:0 14px}
+}
+@media(max-width:640px){
+  /* En celular la grilla de 7 columnas no entra: scroll horizontal con la
+     columna de horas fija, así las citas se leen sin apretarse. */
+  .cal-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:var(--r-lg);box-shadow:var(--shadow)}
+  .calendar{min-width:600px;overflow:visible;box-shadow:none}
+  .cal-corner,.cal-hour{position:sticky;left:0;z-index:2}
+  .cita .nombre{font-size:.72rem}
 }
 @media(max-width:560px){
   .bar-row{grid-template-columns:1fr auto;grid-template-areas:'name val' 'track track';gap:6px 10px}
@@ -648,7 +655,7 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
         <button class="nav-btn" onclick="semana(1)" aria-label="Semana siguiente">&#8250;</button>
       </div>
     </div>
-    <div class="calendar" id="cal" style="--days:7;display:none"></div>
+    <div class="cal-scroll"><div class="calendar" id="cal" style="--days:7;display:none"></div></div>
   </section>
 
   <section id="view-reporte" class="view" hidden>
@@ -891,7 +898,10 @@ function semana(dir){offset+=dir;renderAgenda()}
 
 /* agenda */
 async function renderAgenda(){
-  var hoy=new Date();var lun=lunes(hoy);lun.setDate(lun.getDate()+offset*7);
+  var hoy=new Date();var lun=lunes(hoy);
+  // Domingo (centro cerrado): la semana lun-dom ya terminó, arrancamos en la próxima.
+  if(hoy.getDay()===0){lun.setDate(lun.getDate()+7)}
+  lun.setDate(lun.getDate()+offset*7);
   var dias=[];for(var i=0;i<7;i++){var d=new Date(lun);d.setDate(d.getDate()+i);dias.push(d)}
   $("rango").textContent=fmtCorto(dias[0])+" – "+fmtCorto(dias[6]);
   var r;
