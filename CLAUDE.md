@@ -83,7 +83,10 @@ sam local invoke                          # Test Lambda locally
   10.000 / 15.000 / 20.000. Seguimiento: 8.000 / 12.000 / 18.000. La cita nace
   como `adulto`; la terapeuta ajusta el tramo en el panel (`actualizar_tramo_cita`).
 - Estados de cita: `confirmada` → `completada` | `no_show` | `cancelada`. La
-  terapeuta marca realizada/no-asistió desde el panel (`marcar_estado_cita`);
+  terapeuta marca realizada/no-asistió desde el panel (`marcar_estado_cita`) o
+  con un toque desde el auto-prompt de Telegram (`attendance_prompt.py`, Lambda
+  programada que ~1h después de la cita le pregunta si se realizó; el botón
+  entra por el webhook con callback `att|<estado>|<slot>`);
   `cancelada` libera el slot y borra el evento del calendar.
 - Profesional: Terapeuta Nelly Pailacura
 - Max citas por cliente: 3
