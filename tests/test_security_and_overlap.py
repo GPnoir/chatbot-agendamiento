@@ -533,6 +533,47 @@ def wa_client_empty_secret():
             yield c
 
 
+class TestWhatsAppIdempotencia:
+    """Meta reintenta el webhook con el mismo message id (wamid); el reintento
+    no debe procesarse de nuevo."""
+
+    def _body(self, wamid="wamid.TEST1", text="hola"):
+        payload = {
+            "object": "whatsapp_business_account",
+            "entry": [{"changes": [{"value": {"messages": [
+                {"type": "text", "id": wamid, "from": "5491100000000", "text": {"body": text}},
+            ]}}]}],
+        }
+        return json.dumps(payload).encode()
+
+    def test_wamid_repetido_se_procesa_una_vez(self):
+        import lambda_handler
+        body = self._body()
+        sig = _make_wa_signature(_WA_SECRET, body)
+        h = {"Content-Type": "application/json", "X-Hub-Signature-256": sig}
+        with patch("lambda_handler.WHATSAPP_APP_SECRET", _WA_SECRET):
+            with patch("lambda_handler.chatbot.handle_message", return_value="ok") as mock_handle:
+                with patch("lambda_handler._send_whatsapp", return_value=None):
+                    with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+                        r1 = c.post("/whatsapp/webhook", content=body, headers=h)
+                        r2 = c.post("/whatsapp/webhook", content=body, headers=h)  # reintento
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert mock_handle.call_count == 1
+
+    def test_wamids_distintos_se_procesan(self):
+        import lambda_handler
+        b1 = self._body(wamid="wamid.A"); b2 = self._body(wamid="wamid.B")
+        with patch("lambda_handler.WHATSAPP_APP_SECRET", _WA_SECRET):
+            with patch("lambda_handler.chatbot.handle_message", return_value="ok") as mock_handle:
+                with patch("lambda_handler._send_whatsapp", return_value=None):
+                    with TestClient(lambda_handler.app, raise_server_exceptions=True) as c:
+                        c.post("/whatsapp/webhook", content=b1,
+                               headers={"Content-Type": "application/json", "X-Hub-Signature-256": _make_wa_signature(_WA_SECRET, b1)})
+                        c.post("/whatsapp/webhook", content=b2,
+                               headers={"Content-Type": "application/json", "X-Hub-Signature-256": _make_wa_signature(_WA_SECRET, b2)})
+        assert mock_handle.call_count == 2
+
+
 class TestWhatsAppSignatureVerification:
     """Regression tests for fail-closed WhatsApp HMAC signature validation."""
 

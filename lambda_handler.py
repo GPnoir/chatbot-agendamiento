@@ -1075,6 +1075,12 @@ async def whatsapp_message(request: Request):
     except (KeyError, IndexError, ValueError):
         return {"status": "ok"}
 
+    # Idempotencia: Meta reintenta el webhook con el mismo message id (wamid).
+    wamid = message.get("id") if isinstance(message, dict) else None
+    if wamid and session_store.seen_whatsapp_message(wamid):
+        logger.debug("whatsapp webhook: wamid repetido, ignorado")
+        return {"status": "ok"}
+
     clean = validate_message_text(raw_text)
     if clean is None:
         if is_oversized(raw_text):

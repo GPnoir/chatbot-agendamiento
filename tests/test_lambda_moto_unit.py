@@ -428,6 +428,13 @@ class TestSessionStore:
         assert session_store.seen_update(98765) is True   # repetido
         assert session_store.seen_update(98766) is False  # otro id: nuevo
 
+    def test_seen_whatsapp_message_marca_y_detecta_repetido(self):
+        assert session_store.seen_whatsapp_message("wamid.A") is False
+        assert session_store.seen_whatsapp_message("wamid.A") is True
+        assert session_store.seen_whatsapp_message("wamid.B") is False
+        # namespaces separados: un wamid no colisiona con un update_id igual
+        assert session_store.seen_update("wamid.A") is False
+
 
 # ---------------------------------------------------------------------------
 # lambda_handler: webhook Telegram end-to-end contra moto

@@ -70,22 +70,16 @@ def clear_session(user_id: str):
     table.delete_item(Key={"PK": "SESSION", "SK": f"USER#{user_id}"})
 
 
-def seen_update(update_id) -> bool:
-    """Marca un update de webhook como procesado (idempotencia ante reintentos).
+def _mark_seen(pk: str, dedup_key: str) -> bool:
+    """Registra un id de webhook con escritura condicional + TTL.
 
-    Telegram reenvía el mismo update_id si el webhook tarda en responder 200.
-    Usa una escritura condicional: retorna False si el update es nuevo (y lo
-    registra), True si ya estaba procesado (debe ignorarse). El registro expira
-    por TTL. Ante cualquier fallo del backend, retorna False (mejor reprocesar
-    que perder un mensaje legítimo)."""
+    Retorna False si el id es nuevo (y lo registra), True si ya estaba (debe
+    ignorarse). Ante cualquier fallo del backend retorna False: mejor reprocesar
+    que perder un mensaje legítimo."""
     table = _get_table()
     try:
         table.put_item(
-            Item={
-                "PK": "TGUPDATE",
-                "SK": f"ID#{update_id}",
-                "ttl": int(time.time()) + UPDATE_DEDUP_TTL_SECONDS,
-            },
+            Item={"PK": pk, "SK": f"ID#{dedup_key}", "ttl": int(time.time()) + UPDATE_DEDUP_TTL_SECONDS},
             ConditionExpression="attribute_not_exists(PK)",
         )
         return False
@@ -93,3 +87,15 @@ def seen_update(update_id) -> bool:
         return True
     except Exception:
         return False
+
+
+def seen_update(update_id) -> bool:
+    """Idempotencia del webhook de Telegram: reenvía el mismo update_id si el
+    webhook tarda en responder 200. Retorna True si el update ya se vio."""
+    return _mark_seen("TGUPDATE", str(update_id))
+
+
+def seen_whatsapp_message(wamid: str) -> bool:
+    """Idempotencia del webhook de WhatsApp: Meta reintenta con el mismo message
+    id (wamid). Retorna True si el mensaje ya se vio."""
+    return _mark_seen("WAMSG", str(wamid))
