@@ -75,7 +75,16 @@ sam local invoke                          # Test Lambda locally
 
 ## Business Domain
 
-- Servicios: Consulta inicial (60min), Seguimiento (30min), Preparación esencias (45min)
+- Servicios: Consulta inicial (60min), Sesión de seguimiento (30min).
+  ("Preparación de esencias" se retiró del catálogo; se desactiva vía
+  `_sync_catalogo_servicios`, las citas históricas se conservan.)
+- Precios por tramo (CLP), snapshot en cada cita (`config.TRAMOS_PRECIO`):
+  convenio TEA/TDAH · niño particular · adulto particular. Consulta inicial:
+  10.000 / 15.000 / 20.000. Seguimiento: 8.000 / 12.000 / 18.000. La cita nace
+  como `adulto`; la terapeuta ajusta el tramo en el panel (`actualizar_tramo_cita`).
+- Estados de cita: `confirmada` → `completada` | `no_show` | `cancelada`. La
+  terapeuta marca realizada/no-asistió desde el panel (`marcar_estado_cita`);
+  `cancelada` libera el slot y borra el evento del calendar.
 - Profesional: Terapeuta Nelly Pailacura
 - Max citas por cliente: 3
 - Channels: Telegram + WhatsApp (same business logic, different adapters)
@@ -131,7 +140,9 @@ Antes de tocar UI, leerlos. Aplica a:
 - **Portal admin** (`/admin/panel` en lambda_handler.py): app web client-side con
   **login usuario+contraseña** (sesión firmada, ver `admin_auth.py`) y menú
   hamburguesa con 4 destinos:
-  - **Agenda** semanal interactiva (click en una cita → panel de detalle + cancelar).
+  - **Agenda** semanal interactiva (click en una cita → panel de detalle:
+    marcar realizada / no asistió, asignar tramo de precio, o cancelar). Muestra
+    confirmadas + atendidas (✓ realizada, ✕ no-show); oculta canceladas.
   - **Reporte** (dashboard de métricas sobre `/admin/reporte`).
   - **Fichas** de pacientes (lista + buscador → ficha con histórico de citas y
     notas del terapeuta).
@@ -141,7 +152,8 @@ Antes de tocar UI, leerlos. Aplica a:
   test_security_and_overlap.py). Endpoints admin (todos con auth; **cada uno
   declarado como ruta `Api` en template.yaml** o API Gateway responde 403 en prod):
   `/admin/login`, `/admin/agenda`, `/admin/reporte`, `/admin/cita/cancelar`,
-  `/admin/clientes`, `/admin/cliente`, `/admin/cliente/nota`.
+  `/admin/cita/estado`, `/admin/cita/tramo`, `/admin/clientes`, `/admin/cliente`,
+  `/admin/cliente/nota`.
 - **Chatbot**: la "UI" es copy + estructura de mensajes (config.MENSAJES) +
   botones inline (telegram_ui.py). `build_message` arma texto+teclado **sin
   duplicar** las opciones numeradas; al tocar un botón el mensaje se edita para
