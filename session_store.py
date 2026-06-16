@@ -9,6 +9,7 @@ from boto3.dynamodb.conditions import Key
 
 TABLE_NAME = os.getenv("DYNAMODB_TABLE", "chatbot-agendamiento")
 SESSION_TTL_SECONDS = 600  # 10 minutos
+UPDATE_DEDUP_TTL_SECONDS = 3600  # 1h: cubre de sobra los reintentos de Telegram
 
 _table = None
 
@@ -67,3 +68,34 @@ def save_session(user_id: str, session: dict):
 def clear_session(user_id: str):
     table = _get_table()
     table.delete_item(Key={"PK": "SESSION", "SK": f"USER#{user_id}"})
+
+
+def _mark_seen(pk: str, dedup_key: str) -> bool:
+    """Registra un id de webhook con escritura condicional + TTL.
+
+    Retorna False si el id es nuevo (y lo registra), True si ya estaba (debe
+    ignorarse). Ante cualquier fallo del backend retorna False: mejor reprocesar
+    que perder un mensaje legítimo."""
+    table = _get_table()
+    try:
+        table.put_item(
+            Item={"PK": pk, "SK": f"ID#{dedup_key}", "ttl": int(time.time()) + UPDATE_DEDUP_TTL_SECONDS},
+            ConditionExpression="attribute_not_exists(PK)",
+        )
+        return False
+    except table.meta.client.exceptions.ConditionalCheckFailedException:
+        return True
+    except Exception:
+        return False
+
+
+def seen_update(update_id) -> bool:
+    """Idempotencia del webhook de Telegram: reenvía el mismo update_id si el
+    webhook tarda en responder 200. Retorna True si el update ya se vio."""
+    return _mark_seen("TGUPDATE", str(update_id))
+
+
+def seen_whatsapp_message(wamid: str) -> bool:
+    """Idempotencia del webhook de WhatsApp: Meta reintenta con el mismo message
+    id (wamid). Retorna True si el mensaje ya se vio."""
+    return _mark_seen("WAMSG", str(wamid))

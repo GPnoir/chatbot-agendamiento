@@ -4,6 +4,7 @@ Cubre la derivación de inline keyboards desde el texto de respuesta
 (telegram_ui), la validación estructural de callback_query
 (input_validation) y el flujo completo del webhook con callbacks.
 """
+import itertools
 import time
 from unittest.mock import patch
 
@@ -79,6 +80,10 @@ class TestBuildReplyMarkup:
 # input_validation.validate_telegram_callback
 # ---------------------------------------------------------------------------
 
+# update_id único por llamada: el webhook deduplica reintentos por update_id.
+_update_seq = itertools.count(2000)
+
+
 def _callback_update(user_id=123, data="1", with_message=True) -> dict:
     cq = {
         "id": "cbq-1",
@@ -91,7 +96,7 @@ def _callback_update(user_id=123, data="1", with_message=True) -> dict:
             "chat": {"id": user_id, "type": "private"},
             "date": int(time.time()),
         }
-    return {"update_id": 2, "callback_query": cq}
+    return {"update_id": next(_update_seq), "callback_query": cq}
 
 
 class TestValidateTelegramCallback:
@@ -144,7 +149,7 @@ def lambda_buttons_client():
 
 def _text_update(user_id: int, text: str) -> dict:
     return {
-        "update_id": 1,
+        "update_id": next(_update_seq),
         "message": {
             "message_id": 1,
             "from": {"id": user_id, "is_bot": False, "first_name": "Test"},

@@ -262,7 +262,12 @@ def _handle_booking_confirm(session, canal, canal_user_id, text):
         prof = session["data"]["profesional"]
         fecha = session["data"]["fecha"]
         hora = session["data"]["hora"]
-        db.crear_cita(cliente["id"], serv["id"], prof["id"], fecha.isoformat(), hora)
+        try:
+            db.crear_cita(cliente["id"], serv["id"], prof["id"], fecha.isoformat(), hora)
+        except db.SlotNoDisponibleError:
+            session["state"] = IDLE
+            session["data"] = {}
+            return "😕 Ese horario se acaba de ocupar. Escribe *menu* para elegir otro."
         _notify_profesional(f"📅 Nueva cita agendada:\n👤 {session['data']['nombre_cliente']}\n📋 {serv['nombre']}\n🕐 {fecha.strftime('%d/%m/%Y')} a las {hora}")
         session["state"] = IDLE
         session["data"] = {}
@@ -310,6 +315,10 @@ def _handle_modify_select(session, text):
     session["data"]["cita_seleccionada"] = cita
     servicios = db.get_servicios()
     serv = next((s for s in servicios if s["id"] == cita["servicio_id"]), None)
+    if serv is None:
+        session["state"] = IDLE
+        session["data"] = {}
+        return "No pude recuperar los datos de esa cita. Escribe *menu* para volver a empezar."
     session["data"]["servicio"] = serv
     session["data"]["profesional"] = {"id": cita["profesional_id"], "nombre": cita.get("profesional_nombre", "")}
     fechas = db.get_fechas_disponibles(cita["profesional_id"], serv["duracion_min"])
@@ -370,7 +379,12 @@ def _handle_modify_confirm(session, canal, canal_user_id, text):
         cita = session["data"]["cita_seleccionada"]
         fecha = session["data"]["nueva_fecha"]
         hora = session["data"]["nueva_hora"]
-        db.modificar_cita(cita["PK"], cita["SK"], fecha.isoformat(), hora)
+        try:
+            db.modificar_cita(cita["PK"], cita["SK"], fecha.isoformat(), hora)
+        except db.SlotNoDisponibleError:
+            session["state"] = IDLE
+            session["data"] = {}
+            return "😕 Ese horario se acaba de ocupar. Tu cita quedó como estaba. Escribe *menu* para intentar otro horario."
         _notify_profesional(
             f"🔄 Cita reagendada:\n📋 {cita.get('servicio_nombre', '')}\n🕐 {fecha.strftime('%d/%m/%Y')} a las {hora}"
         )
@@ -462,6 +476,9 @@ def _handle_admin_command(text: str) -> str | None:
             f"❌ Canceladas: {resumen['por_estado'].get('cancelada', 0)}",
             f"✔️ Completadas: {resumen['por_estado'].get('completada', 0)}",
             f"Tasa de cancelación: {resumen['tasa_cancelacion']:.0%}",
+            f"💰 Facturación: ${resumen.get('facturacion', 0):,.0f}".replace(",", "."),
+            f"👥 Pacientes nuevos: {resumen.get('pacientes_nuevos', 0)} · recurrentes: {resumen.get('pacientes_recurrentes', 0)}",
+            f"🗓 Ocupación: {resumen.get('ocupacion', 0):.0%} ({resumen.get('horas_ocupadas', 0)}/{resumen.get('horas_disponibles', 0)} h)",
         ]
         if resumen["por_servicio"]:
             lines.append("\nPor servicio:")

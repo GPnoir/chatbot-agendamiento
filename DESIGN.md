@@ -73,5 +73,14 @@ Removidos del diseño anterior y prohibidos a futuro:
 - **Resumen de reporte:** cifra guía (serif) + `<dl>` de stats con separadores.
 - **Medidor de tasa:** barra fina horizontal (arcilla) con label.
 - **Barras por servicio:** lista con pista + relleno proporcional (acento) + valor.
+- **Login (usuario + contraseña):** card centrado con marca botánica; el shell no
+  embebe datos ni secretos; el token de sesión va en sessionStorage + Bearer.
+- **Menú hamburguesa + drawer:** drawer lateral izquierdo con backdrop (Agenda ·
+  Reporte · Fichas · Cerrar sesión); cierra al elegir / fondo / Escape; ítem
+  activo con `aria-current`.
+- **Panel de detalle de cita:** drawer lateral derecho con la info de la cita y
+  acción de cancelar (confirmación inline en arcilla).
+- **Fichas:** lista de pacientes (avatar de iniciales + buscador) → ficha con card
+  de paciente, historial de citas y notas (form de alta + listado).
 - **Estados:** login shell, cargando (skeleton), vacío (mensaje sereno + marca),
   error de auth (vuelve al login).

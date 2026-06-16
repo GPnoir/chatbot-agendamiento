@@ -13,9 +13,10 @@ from mangum import Mangum
 import admin_auth
 import chatbot_lambda as chatbot
 import database_dynamo as db
+import session_store
 from config import (
     WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN,
-    WHATSAPP_APP_SECRET, TELEGRAM_WEBHOOK_SECRET, ADMIN_API_KEY,
+    WHATSAPP_APP_SECRET, TELEGRAM_WEBHOOK_SECRET, ADMIN_API_KEY, ADMIN_USER_ID,
     ADMIN_USERNAME, ADMIN_PASSWORD_HASH, SESSION_SECRET,
 )
 from rate_limiter import is_rate_limited
@@ -147,9 +148,11 @@ async def admin_agenda(
     table = db.get_table()
     all_citas = []
     for f in fechas:
+        # Incluye confirmada/completada/no_show (la terapeuta ve qué pasó cada
+        # día); solo se ocultan las canceladas.
         resp = table.scan(
-            FilterExpression="begins_with(PK, :p) AND fecha = :f AND estado = :e",
-            ExpressionAttributeValues={":p": "APPOINTMENT#", ":f": f, ":e": "confirmada"},
+            FilterExpression="begins_with(PK, :p) AND fecha = :f AND estado <> :c",
+            ExpressionAttributeValues={":p": "APPOINTMENT#", ":f": f, ":c": "cancelada"},
         )
         all_citas.extend(resp["Items"])
 
@@ -223,6 +226,68 @@ async def admin_cancelar_cita(request: Request):
     return {"status": "ok"}
 
 
+def _validar_cita_existente(body):
+    """Valida {pk, sk} de un body admin: que sean strings con forma de cita y
+    que la cita exista. Retorna (pk, sk, error_response) — error_response es
+    None si todo OK."""
+    pk = body.get("pk") if isinstance(body, dict) else None
+    sk = body.get("sk") if isinstance(body, dict) else None
+    if (not isinstance(pk, str) or not isinstance(sk, str)
+            or not pk.startswith("APPOINTMENT#") or not sk.startswith("DATE#")):
+        return None, None, JSONResponse(status_code=400, content={"error": "invalid appointment id"})
+    if not db.get_table().get_item(Key={"PK": pk, "SK": sk}).get("Item"):
+        return None, None, JSONResponse(status_code=404, content={"error": "not found"})
+    return pk, sk, None
+
+
+@app.post("/admin/cita/estado")
+async def admin_marcar_estado(request: Request):
+    """Marca la atención de una cita: completada / no_show (o vuelve a confirmada).
+
+    Body: {pk, sk, estado}. Requiere auth y valida que la clave sea una cita.
+    """
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return JSONResponse(status_code=400, content={"error": "invalid json"})
+    pk, sk, err = _validar_cita_existente(body)
+    if err:
+        return err
+    try:
+        db.marcar_estado_cita(pk, sk, body.get("estado"))
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "invalid estado"})
+    return {"status": "ok", "estado": body.get("estado")}
+
+
+@app.post("/admin/cita/tramo")
+async def admin_asignar_tramo(request: Request):
+    """Asigna el tramo de precio (categoría del paciente) y recalcula el precio.
+
+    Body: {pk, sk, tramo}. Requiere auth y valida que la clave sea una cita.
+    """
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return JSONResponse(status_code=400, content={"error": "invalid json"})
+    pk, sk, err = _validar_cita_existente(body)
+    if err:
+        return err
+    try:
+        db.actualizar_tramo_cita(pk, sk, body.get("tramo"))
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "invalid tramo"})
+    from decimal import Decimal
+    item = db.get_table().get_item(Key={"PK": pk, "SK": sk}).get("Item", {})
+    precio = item.get("precio")
+    return {"status": "ok", "tramo": body.get("tramo"),
+            "precio": int(precio) if isinstance(precio, Decimal) else precio}
+
+
 # ── Fichas de pacientes ───────────────────────────────────────────────
 def _clean_item(d: dict) -> dict:
     """Quita claves internas de DynamoDB y convierte Decimal a int."""
@@ -284,6 +349,57 @@ async def admin_agregar_nota(request: Request):
         return JSONResponse(status_code=404, content={"error": "client not found"})
     nota = db.agregar_nota(cliente_id, texto)
     return {"status": "ok", "nota": {"texto": nota["texto"], "created_at": nota["created_at"]}}
+
+
+@app.post("/admin/cliente/mensaje")
+async def admin_enviar_mensaje(request: Request):
+    """Envía un mensaje al paciente por el bot, opcional con botones para que él
+    reagende/cancele su cita. Body: {cliente_id, texto, acciones?}.
+
+    Seguridad: el destino NUNCA viene del body — se resuelve el canal y el
+    canal_user_id del cliente almacenado (regla #4). Sanitiza y limita el texto.
+    """
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return JSONResponse(status_code=400, content={"error": "invalid json"})
+    cliente_id = body.get("cliente_id") if isinstance(body, dict) else None
+    texto = body.get("texto") if isinstance(body, dict) else None
+    acciones = bool(body.get("acciones")) if isinstance(body, dict) else False
+    if not isinstance(cliente_id, str) or not isinstance(texto, str):
+        return JSONResponse(status_code=400, content={"error": "missing fields"})
+    texto = sanitize_text(texto)
+    if not texto or len(texto) > 1000:
+        return JSONResponse(status_code=400, content={"error": "invalid message text"})
+    cliente = db.get_cliente(cliente_id)
+    if not cliente:
+        return JSONResponse(status_code=404, content={"error": "client not found"})
+    canal = cliente.get("canal")
+    destino = cliente.get("canal_user_id")
+    if not destino or canal not in ("telegram", "whatsapp"):
+        return JSONResponse(status_code=400, content={"error": "client has no reachable channel"})
+    try:
+        if canal == "telegram":
+            # Los botones reusan el menú del bot: callback 2 = reagendar, 3 = cancelar.
+            markup = None
+            if acciones:
+                markup = {"inline_keyboard": [[
+                    {"text": "🔄 Reagendar", "callback_data": "2"},
+                    {"text": "❌ Cancelar", "callback_data": "3"},
+                ]]}
+            await _send_telegram(int(destino), texto, reply_markup=markup)
+        else:  # whatsapp
+            if acciones:
+                # Botones interactivos; el id vuelve por el webhook = menú del bot.
+                await _send_whatsapp_buttons(destino, texto, [("2", "Reagendar"), ("3", "Cancelar")])
+            else:
+                await _send_whatsapp(destino, texto)
+    except Exception as e:
+        logger.error("admin enviar mensaje: send error", extra={"error": str(e)})
+        return JSONResponse(status_code=502, content={"error": "send failed"})
+    return {"status": "ok"}
 
 
 @app.get("/admin/panel")
@@ -366,8 +482,13 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 .detail-fields>div{display:flex;justify-content:space-between;gap:16px;padding:11px 0;border-bottom:1px solid var(--line)}
 .detail-fields dt{font:500 .82rem var(--font-ui);color:var(--ink-3)}
 .detail-fields dd{font:500 .9rem var(--font-ui);color:var(--ink);text-align:right}
-.detail-actions{margin-top:auto;display:flex;flex-direction:column;gap:8px}
+.detail-actions{margin-top:auto;display:flex;flex-direction:column;gap:12px}
 .confirm-row{display:flex;gap:8px}.confirm-row button{flex:1}
+.detail-group{display:flex;flex-direction:column;gap:6px}
+.detail-glabel{font:500 .82rem var(--font-ui);color:var(--ink-3)}
+.detail-select{appearance:none;width:100%;border:1px solid var(--line);background:var(--surface);color:var(--ink);font:500 .9rem var(--font-ui);padding:10px;border-radius:var(--r-sm);cursor:pointer}
+.detail-select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.btn-ghost.is-active{border-color:var(--accent);background:var(--accent-tint);color:var(--accent-strong)}
 .btn-danger{appearance:none;border:1px solid color-mix(in oklch,var(--clay) 40%,transparent);background:var(--clay-tint);color:var(--clay-ink);font:600 .9rem var(--font-ui);padding:11px;border-radius:var(--r-sm);cursor:pointer;transition:background .15s var(--ease)}
 .btn-danger:hover{background:color-mix(in oklch,var(--clay-tint) 65%,var(--clay))}
 .btn-ghost{appearance:none;border:1px solid var(--line);background:var(--surface);color:var(--ink-2);font:600 .9rem var(--font-ui);padding:11px;border-radius:var(--r-sm);cursor:pointer;transition:border-color .15s var(--ease),color .15s var(--ease)}
@@ -402,6 +523,13 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 .hist-text{display:flex;justify-content:space-between;gap:12px;flex:1;min-width:0;flex-wrap:wrap}
 .hist-serv{font:500 .9rem var(--font-ui);color:var(--ink)}
 .hist-when{font:500 .85rem var(--font-ui);color:var(--ink-3);font-variant-numeric:tabular-nums}
+.btn-contacto{display:inline-flex;align-items:center;gap:8px;text-decoration:none;border:1px solid var(--line);background:var(--surface);color:var(--ink);font:600 .9rem var(--font-ui);padding:10px 14px;border-radius:var(--r-sm);margin-bottom:12px;transition:border-color .15s var(--ease),color .15s var(--ease)}
+.btn-contacto:hover{border-color:var(--accent);color:var(--accent-strong)}
+.contacto-nota{font:400 .85rem/1.5 var(--font-ui);color:var(--ink-3);margin:0 0 12px}
+.msg-acciones{display:flex;align-items:center;gap:8px;font:500 .85rem var(--font-ui);color:var(--ink-2)}
+.msg-fb{font:500 .85rem var(--font-ui);padding:8px 10px;border-radius:var(--r-sm);text-align:center;color:var(--ink-2)}
+.msg-fb.ok{background:var(--accent-tint);color:var(--accent-strong)}
+.msg-fb.err{background:var(--clay-tint);color:var(--clay-ink)}
 .nota-form{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
 .nota-form textarea{width:100%;padding:10px 12px;border:1px solid var(--line-2);border-radius:var(--r-sm);font:400 .92rem var(--font-ui);color:var(--ink);background:var(--surface);resize:vertical;min-height:64px}
 .nota-form textarea:focus-visible{outline:2px solid var(--focus);outline-offset:1px;border-color:var(--accent)}
@@ -451,6 +579,12 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 .cita .contacto{font:500 .68rem var(--font-ui);color:var(--ink-3)}
 .cita.cita-cancel{background:var(--clay-tint)}
 .cita.cita-cancel .cita-dot{background:var(--clay)}
+.cita.cita-done .cita-dot{background:var(--accent-strong)}
+.cita.cita-noshow{background:var(--clay-tint)}
+.cita.cita-noshow .cita-dot{background:var(--clay)}
+.cita-mark{flex:none;align-self:flex-start;margin-top:3px;font:700 .72rem var(--font-ui);line-height:1}
+.cita-mark.done{color:var(--accent-strong)}
+.cita-mark.noshow{color:var(--clay-ink)}
 
 /* reporte */
 .rep-rango{font:500 .85rem var(--font-ui);color:var(--ink-3);margin:-8px 0 18px}
@@ -465,8 +599,13 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 .stat dt{font:500 .76rem var(--font-ui);color:var(--ink-3);margin-bottom:4px}
 .stat dd{font:600 1.4rem var(--font-display);color:var(--ink);font-variant-numeric:tabular-nums}
 .dd-clay{color:var(--clay-ink)}
-.meter{height:6px;border-radius:999px;background:var(--surface-sunk);overflow:hidden;margin-top:18px}
+.meter{height:6px;border-radius:999px;background:var(--surface-sunk);overflow:hidden;margin-top:6px}
 .meter-fill{display:block;height:100%;width:0;background:var(--clay);border-radius:999px;transition:width .55s var(--ease)}
+.meter-fill.acc{background:var(--accent)}
+.rep-meters{display:flex;flex-direction:column;gap:14px;margin-top:18px}
+.meter-block{display:flex;flex-direction:column}
+.meter-label{font:500 .78rem var(--font-ui);color:var(--ink-3)}
+.rep-block+.rep-block{margin-top:20px}
 .rep-block{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:22px clamp(18px,3vw,28px)}
 .block-title{font:600 1.05rem var(--font-display);color:var(--ink);margin-bottom:16px;letter-spacing:-.01em}
 .bars{list-style:none;display:flex;flex-direction:column;gap:14px}
@@ -497,11 +636,18 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 @keyframes sk{from{background-position:200% 0}to{background-position:-200% 0}}
 @media(max-width:768px){
-  .calendar{grid-template-columns:42px repeat(var(--days),1fr)}
   .cal-head,.cal-hour{font-size:.62rem}
-  .cita .nombre{font-size:.66rem}.cita .servicio,.cita .contacto{display:none}
+  .cita .servicio,.cita .contacto{display:none}
   .brand-sub{display:none}
   .stat{padding:0 14px}
+}
+@media(max-width:640px){
+  /* En celular la grilla de 7 columnas no entra: scroll horizontal con la
+     columna de horas fija, así las citas se leen sin apretarse. */
+  .cal-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:var(--r-lg);box-shadow:var(--shadow)}
+  .calendar{min-width:600px;overflow:visible;box-shadow:none}
+  .cal-corner,.cal-hour{position:sticky;left:0;z-index:2}
+  .cita .nombre{font-size:.72rem}
 }
 @media(max-width:560px){
   .bar-row{grid-template-columns:1fr auto;grid-template-areas:'name val' 'track track';gap:6px 10px}
@@ -567,7 +713,7 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
         <button class="nav-btn" onclick="semana(1)" aria-label="Semana siguiente">&#8250;</button>
       </div>
     </div>
-    <div class="calendar" id="cal" style="--days:7;display:none"></div>
+    <div class="cal-scroll"><div class="calendar" id="cal" style="--days:7;display:none"></div></div>
   </section>
 
   <section id="view-reporte" class="view" hidden>
@@ -652,9 +798,18 @@ function toggleNav(){if($("nav-drawer").hidden){openNav()}else{closeNav()}}
 function navTo(view){closeNav();switchView(view)}
 
 /* panel de detalle de cita (agenda) */
+var TRAMO_LBL={adulto:"Adulto particular",nino:"Niño particular",convenio_tea:"Convenio TEA/TDAH"};
+var ESTADO_LBL={confirmada:"Confirmada",completada:"Realizada",no_show:"No asistió"};
+function fmtPrecio(p){if(p==null||p==="")return "—";return "$"+Number(p).toLocaleString("es-CL")}
 function openDetail(id){
   var c=(window._citas||{})[id];if(!c){return}
   window._detailCita=c;
+  renderDetailFields();
+  detailActions();
+  $("detail-backdrop").hidden=false;$("detail-panel").hidden=false;
+}
+function renderDetailFields(){
+  var c=window._detailCita;if(!c){return}
   var dias=["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
   var d=new Date(c.fecha+"T00:00:00");
   var contacto=c.cliente_canal==="telegram"?"Telegram @"+c.cliente_contacto:c.cliente_canal==="whatsapp"?"WhatsApp +"+c.cliente_contacto:(c.cliente_contacto||"—");
@@ -665,11 +820,49 @@ function openDetail(id){
     row("Profesional",c.profesional_nombre||"—")+
     row("Fecha",dias[d.getDay()]+" "+fmtCorto(d))+
     row("Hora",c.hora)+
+    row("Estado",ESTADO_LBL[c.estado]||c.estado||"Confirmada")+
+    row("Categoría",TRAMO_LBL[c.tramo]||"Adulto particular")+
+    row("Precio",fmtPrecio(c.precio))+
     row("Contacto",contacto);
-  detailActions();
-  $("detail-backdrop").hidden=false;$("detail-panel").hidden=false;
 }
-function detailActions(){$("detail-actions").innerHTML="<button class='btn-danger' onclick='askCancel()'>Cancelar cita</button>"}
+function detailActions(){
+  var c=window._detailCita;if(!c){return}
+  var est=c.estado||"confirmada";
+  var h="<div class='detail-group'><span class='detail-glabel'>¿Se realizó la atención?</span><div class='confirm-row'>";
+  h+="<button class='btn-ghost"+(est==="completada"?" is-active":"")+"' onclick=\"setEstado('completada')\">Realizada</button>";
+  h+="<button class='btn-ghost"+(est==="no_show"?" is-active":"")+"' onclick=\"setEstado('no_show')\">No asistió</button>";
+  h+="</div></div>";
+  h+="<div class='detail-group'><span class='detail-glabel'>Categoría del paciente (precio)</span>";
+  h+="<select class='detail-select' onchange='setTramo(this.value)'>";
+  ["adulto","nino","convenio_tea"].forEach(function(t){h+="<option value='"+t+"'"+((c.tramo||"adulto")===t?" selected":"")+">"+TRAMO_LBL[t]+"</option>"});
+  h+="</select></div>";
+  h+="<button class='btn-danger' onclick='askCancel()'>Cancelar cita</button>";
+  h+="<p class='detail-msg' id='detail-fb' hidden></p>";
+  $("detail-actions").innerHTML=h;
+}
+function _detailFb(msg,cls){var e=$("detail-fb");if(!e){return}e.hidden=false;e.textContent=msg;e.className="detail-msg"+(cls?" "+cls:"")}
+async function setEstado(estado){
+  var c=window._detailCita;if(!c){return}
+  _detailFb("Guardando…");
+  var r;
+  try{r=await fetch(base()+"/admin/cita/estado",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},body:JSON.stringify({pk:c.pk,sk:c.sk,estado:estado})})}
+  catch(e){_detailFb("No se pudo guardar. Reintentá.","err");return}
+  if(r.status===401||r.status===403){onAuthLost();return}
+  if(!r.ok){_detailFb("No se pudo guardar.","err");return}
+  c.estado=estado;renderDetailFields();detailActions();_detailFb("Guardado.","ok");renderAgenda();
+}
+async function setTramo(tramo){
+  var c=window._detailCita;if(!c){return}
+  _detailFb("Guardando…");
+  var r;
+  try{r=await fetch(base()+"/admin/cita/tramo",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},body:JSON.stringify({pk:c.pk,sk:c.sk,tramo:tramo})})}
+  catch(e){_detailFb("No se pudo guardar. Reintentá.","err");return}
+  if(r.status===401||r.status===403){onAuthLost();return}
+  if(!r.ok){_detailFb("No se pudo guardar.","err");return}
+  var data=await r.json().catch(function(){return{}});
+  c.tramo=tramo;if(data&&data.precio!=null){c.precio=data.precio}
+  renderDetailFields();_detailFb("Guardado.","ok");renderAgenda();
+}
 function askCancel(){$("detail-actions").innerHTML="<p class='detail-msg'>¿Seguro que querés cancelar esta cita?</p><div class='confirm-row'><button class='btn-danger' onclick='doCancel()'>Sí, cancelar</button><button class='btn-ghost' onclick='detailActions()'>No</button></div>"}
 async function doCancel(){
   var c=window._detailCita;if(!c){return}
@@ -733,6 +926,13 @@ function renderFicha(data){
   var estIcon={confirmada:"✅",cancelada:"❌",completada:"✔️"};
   var h="<button class='btn-ghost ficha-back' onclick='loadFichas()'>‹ Volver a la lista</button>";
   h+="<div class='ficha-card'><div class='ficha-hd'><span class='ficha-avatar lg'>"+esc(iniciales(c.nombre))+"</span><div><div class='ficha-h-name'>"+esc(c.nombre||"Sin nombre")+"</div><div class='ficha-h-sub'>"+esc(sub)+"</div></div></div></div>";
+  h+="<section class='ficha-block'><h2 class='block-title'>Contacto</h2>";
+  if(c.canal==="whatsapp"){var num=(""+(c.canal_user_id||"")).replace(/[^0-9]/g,"");if(num){h+="<a class='btn-contacto' href='https://wa.me/"+num+"' target='_blank' rel='noopener'>Abrir WhatsApp con "+esc(c.nombre||"el paciente")+"</a>"}}
+  else if(c.canal==="telegram"){h+="<p class='contacto-nota'>Telegram no permite abrir el chat desde acá; mandale el mensaje por el bot.</p>"}
+  h+="<div class='nota-form msg-form'><textarea id='msg-texto' rows='3' maxlength='1000' placeholder='Mensaje para "+esc(c.nombre||"el paciente")+"…'></textarea>";
+  h+="<label class='msg-acciones'><input type='checkbox' id='msg-acciones'> Incluir botones para reagendar / cancelar su cita</label>";
+  h+="<button class='btn-accent' id='msg-btn' onclick='enviarMensaje()'>Enviar por el bot</button>";
+  h+="<p class='msg-fb' id='msg-fb' hidden></p></div></section>";
   h+="<section class='ficha-block'><h2 class='block-title'>Historial de citas</h2>";
   if(!hist.length){h+="<p class='ficha-empty'>Sin citas registradas.</p>"}
   else{h+="<ul class='ficha-hist'>";hist.forEach(function(a){h+="<li><span class='hist-est'>"+(estIcon[a.estado]||"")+"</span><span class='hist-text'><span class='hist-serv'>"+esc(a.servicio_nombre||"Consulta")+"</span><span class='hist-when'>"+esc(a.fecha)+" · "+esc(a.hora)+"</span></span></li>"});h+="</ul>"}
@@ -759,11 +959,28 @@ async function addNota(){
   if(r.ok){fetchFicha(window._fichaId)}
   else{btn.disabled=false;btn.textContent="Agregar nota"}
 }
+function _msgFb(m,cls){var e=$("msg-fb");if(!e){return}e.hidden=false;e.textContent=m;e.className="msg-fb"+(cls?" "+cls:"")}
+async function enviarMensaje(){
+  var ta=$("msg-texto");if(!ta){return}
+  var texto=(ta.value||"").trim();if(!texto){_msgFb("Escribí un mensaje primero.","err");return}
+  var acciones=!!($("msg-acciones")&&$("msg-acciones").checked);
+  var btn=$("msg-btn");btn.disabled=true;btn.textContent="Enviando…";
+  var r;
+  try{r=await fetch(base()+"/admin/cliente/mensaje",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},body:JSON.stringify({cliente_id:window._fichaId,texto:texto,acciones:acciones})})}
+  catch(e){btn.disabled=false;btn.textContent="Enviar por el bot";_msgFb("No se pudo enviar. Reintentá.","err");return}
+  if(r.status===401||r.status===403){onAuthLost();return}
+  btn.disabled=false;btn.textContent="Enviar por el bot";
+  if(r.ok){ta.value="";if($("msg-acciones"))$("msg-acciones").checked=false;_msgFb("Mensaje enviado.","ok")}
+  else{_msgFb("No se pudo enviar.","err")}
+}
 function semana(dir){offset+=dir;renderAgenda()}
 
 /* agenda */
 async function renderAgenda(){
-  var hoy=new Date();var lun=lunes(hoy);lun.setDate(lun.getDate()+offset*7);
+  var hoy=new Date();var lun=lunes(hoy);
+  // Domingo (centro cerrado): la semana lun-dom ya terminó, arrancamos en la próxima.
+  if(hoy.getDay()===0){lun.setDate(lun.getDate()+7)}
+  lun.setDate(lun.getDate()+offset*7);
   var dias=[];for(var i=0;i<7;i++){var d=new Date(lun);d.setDate(d.getDate()+i);dias.push(d)}
   $("rango").textContent=fmtCorto(dias[0])+" – "+fmtCorto(dias[6]);
   var r;
@@ -793,8 +1010,9 @@ async function renderAgenda(){
         html+="<div class='cal-cell"+t+"'>";
         citas.forEach(function(c){
           var contacto=c.cliente_canal==="telegram"?"Telegram @"+c.cliente_contacto:c.cliente_canal==="whatsapp"?"WhatsApp +"+c.cliente_contacto:(c.cliente_contacto||"");
-          var cancel=c.estado==="cancelada"?" cita-cancel":"";
-          html+="<div class='cita"+cancel+"' onclick='openDetail("+c._id+")'><span class='cita-dot'></span><div class='cita-body'><div class='nombre'>"+esc(c.cliente_nombre||"Sin nombre")+"</div><div class='servicio'>"+esc(c.servicio_nombre||"Consulta")+" · "+esc(String(c.servicio_duracion||60))+" min</div><div class='contacto'>"+esc(contacto)+"</div></div></div>";
+          var estCls=c.estado==="completada"?" cita-done":c.estado==="no_show"?" cita-noshow":c.estado==="cancelada"?" cita-cancel":"";
+          var mark=c.estado==="completada"?"<span class='cita-mark done' title='Realizada'>✓</span>":c.estado==="no_show"?"<span class='cita-mark noshow' title='No asistió'>✕</span>":"";
+          html+="<div class='cita"+estCls+"' onclick='openDetail("+c._id+")'><span class='cita-dot'></span><div class='cita-body'><div class='nombre'>"+esc(c.cliente_nombre||"Sin nombre")+"</div><div class='servicio'>"+esc(c.servicio_nombre||"Consulta")+" · "+esc(String(c.servicio_duracion||60))+" min</div><div class='contacto'>"+esc(contacto)+"</div></div>"+mark+"</div>";
         });
         html+="</div>";
       });
@@ -822,29 +1040,47 @@ async function loadReporte(){
   if(!r.ok){rb.innerHTML="<p class='rep-error'>No se pudo cargar el reporte.</p>";return}
   renderReporte(await r.json());
 }
+function fmtCLP(n){return "$"+Number(n||0).toLocaleString("es-CL")}
 function renderReporte(data){
   var rb=$("rep-body");
   var total=data.total||0;
-  var conf=(data.por_estado&&data.por_estado.confirmada)||0;
-  var canc=(data.por_estado&&data.por_estado.cancelada)||0;
-  var tasa=Math.round((data.tasa_cancelacion||0)*100);
   if(total===0){
     rb.innerHTML="<div class='empty'>"+MARK(40)+"<p class='empty-title'>Sin citas en este período</p><p class='empty-sub'>Cuando se agenden citas en el rango elegido, el resumen va a aparecer acá.</p></div>";
     return;
   }
-  var servicios=Object.keys(data.por_servicio||{}).map(function(k){return [k,data.por_servicio[k]]});
-  servicios.sort(function(a,b){return b[1]-a[1]});
-  var maxC=servicios.reduce(function(mx,s){return Math.max(mx,s[1])},1);
+  var est=data.por_estado||{};
+  var conf=est.confirmada||0,canc=est.cancelada||0,comp=est.completada||0;
+  var tasaC=Math.round((data.tasa_cancelacion||0)*100);
+  var tasaNS=Math.round((data.tasa_no_show||0)*100);
+  var ocup=Math.round((data.ocupacion||0)*100);
   var h="<div class='rep-summary'>";
-  h+="<div class='lead'><span class='lead-num'>"+total+"</span><span class='lead-label'>"+(total===1?"cita en el período":"citas en el período")+"</span></div>";
-  h+="<dl class='statrow'><div class='stat'><dt>Confirmadas</dt><dd>"+conf+"</dd></div><div class='stat'><dt>Canceladas</dt><dd class='dd-clay'>"+canc+"</dd></div><div class='stat'><dt>Tasa de cancelación</dt><dd>"+tasa+"%</dd></div></dl>";
-  h+="<div class='meter' role='img' aria-label='Tasa de cancelación "+tasa+" por ciento'><span class='meter-fill' data-w='"+tasa+"%'></span></div></div>";
-  h+="<section class='rep-block'><h2 class='block-title'>Por servicio</h2><ul class='bars'>";
-  servicios.forEach(function(s){
-    var pct=Math.round(s[1]/maxC*100);
-    h+="<li class='bar-row'><span class='bar-name'>"+esc(s[0])+"</span><span class='bar-track'><span class='bar-fill' data-w='"+pct+"%'></span></span><span class='bar-val'>"+s[1]+"</span></li>";
-  });
-  h+="</ul></section>";
+  h+="<div class='lead'><span class='lead-num'>"+fmtCLP(data.facturacion)+"</span><span class='lead-label'>facturado · "+comp+" "+(comp===1?"cita realizada":"citas realizadas")+"</span></div>";
+  h+="<dl class='statrow'>";
+  h+="<div class='stat'><dt>Citas</dt><dd>"+total+"</dd></div>";
+  h+="<div class='stat'><dt>Realizadas</dt><dd>"+comp+"</dd></div>";
+  h+="<div class='stat'><dt>Confirmadas</dt><dd>"+conf+"</dd></div>";
+  h+="<div class='stat'><dt>Canceladas</dt><dd class='dd-clay'>"+canc+"</dd></div>";
+  h+="</dl>";
+  h+="<dl class='statrow'>";
+  h+="<div class='stat'><dt>Pacientes nuevos</dt><dd>"+(data.pacientes_nuevos||0)+"</dd></div>";
+  h+="<div class='stat'><dt>Recurrentes</dt><dd>"+(data.pacientes_recurrentes||0)+"</dd></div>";
+  h+="<div class='stat'><dt>Ocupación</dt><dd>"+ocup+"%</dd></div>";
+  h+="</dl>";
+  h+="<div class='rep-meters'>";
+  h+="<div class='meter-block'><span class='meter-label'>Ocupación · "+data.horas_ocupadas+" de "+data.horas_disponibles+" h</span><div class='meter' role='img' aria-label='Ocupación "+ocup+" por ciento'><span class='meter-fill acc' data-w='"+ocup+"%'></span></div></div>";
+  h+="<div class='meter-block'><span class='meter-label'>Tasa de cancelación · "+tasaC+"%</span><div class='meter' role='img' aria-label='Cancelación "+tasaC+" por ciento'><span class='meter-fill' data-w='"+tasaC+"%'></span></div></div>";
+  h+="<div class='meter-block'><span class='meter-label'>Tasa de no-show · "+tasaNS+"%</span><div class='meter' role='img' aria-label='No-show "+tasaNS+" por ciento'><span class='meter-fill' data-w='"+tasaNS+"%'></span></div></div>";
+  h+="</div></div>";
+  function bars(title,arr,fmt){
+    if(!arr.length){return ""}
+    var mx=arr.reduce(function(m,s){return Math.max(m,s[1])},1);
+    var b="<section class='rep-block'><h2 class='block-title'>"+title+"</h2><ul class='bars'>";
+    arr.forEach(function(s){var pct=Math.round(s[1]/mx*100);b+="<li class='bar-row'><span class='bar-name'>"+esc(s[0])+"</span><span class='bar-track'><span class='bar-fill' data-w='"+pct+"%'></span></span><span class='bar-val'>"+fmt(s[1])+"</span></li>"});
+    return b+"</ul></section>";
+  }
+  function toSorted(obj){return Object.keys(obj||{}).map(function(k){return [k,obj[k]]}).sort(function(a,b){return b[1]-a[1]})}
+  h+=bars("Ingresos por terapia",toSorted(data.ingresos_por_servicio),fmtCLP);
+  h+=bars("Citas por servicio",toSorted(data.por_servicio),function(v){return v});
   rb.innerHTML=h;
   requestAnimationFrame(function(){
     rb.querySelectorAll("[data-w]").forEach(function(el,i){el.style.transitionDelay=(i*55)+"ms";el.style.width=el.getAttribute("data-w")});
@@ -884,6 +1120,28 @@ async def _send_whatsapp(to: str, text: str):
         await client.post(META_API_URL, json=payload, headers=headers)
 
 
+async def _send_whatsapp_buttons(to: str, text: str, buttons: list):
+    """Mensaje interactivo de WhatsApp con botones de respuesta.
+
+    buttons: lista de (id, título). El id vuelve en el webhook como
+    interactive.button_reply.id — reusamos "2"/"3" (el menú del bot). Título ≤20.
+    """
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    payload = {
+        "messaging_product": "whatsapp", "to": to, "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": text},
+            "action": {"buttons": [
+                {"type": "reply", "reply": {"id": bid, "title": title[:20]}}
+                for bid, title in buttons
+            ]},
+        },
+    }
+    async with httpx.AsyncClient() as client:
+        await client.post(META_API_URL, json=payload, headers=headers)
+
+
 async def _send_telegram(chat_id: int, text: str, reply_markup: dict | None = None):
     from config import TELEGRAM_BOT_TOKEN
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -915,6 +1173,43 @@ async def _edit_telegram_message(chat_id: int, message_id: int, text: str):
         await client.post(url, json={"chat_id": chat_id, "message_id": message_id, "text": text})
 
 
+def _reset_user_session(user_id: str) -> None:
+    """Resetea la sesión a IDLE: un fallo inesperado no debe dejar al usuario
+    pegado en un estado intermedio sin forma de salir salvo esperar el TTL."""
+    try:
+        chatbot._save_session(user_id, {"state": chatbot.IDLE, "data": {}})
+    except Exception:
+        logger.debug("no se pudo resetear la sesión tras un error")
+
+
+async def _handle_attendance_callback(cq: dict, data: str, chat_id) -> None:
+    """Marca el estado de una cita desde los botones del prompt de atención
+    (att|<estado>|<fecha>#<hora>#<prof>). Solo lo invoca la terapeuta."""
+    try:
+        _, estado, slot = data.split("|", 2)
+        fecha, hora, prof = slot.split("#")
+    except (ValueError, AttributeError):
+        return
+    if estado not in ("completada", "no_show"):
+        return
+    cita = db.buscar_cita_por_slot(prof, fecha, hora)
+    if not cita:
+        msg = "No encontré esa cita (puede haberse modificado)."
+    else:
+        try:
+            db.marcar_estado_cita(cita["PK"], cita["SK"], estado)
+            label = "✓ Realizada" if estado == "completada" else "✕ No asistió"
+            msg = f"Registrado: {label} — {fecha} {hora}."
+        except Exception as e:
+            logger.error("attendance callback: error", extra={"error": str(e)})
+            msg = "No se pudo registrar. Probá desde el panel."
+    orig = (cq.get("message") or {}).get("text", "")
+    try:
+        await _edit_telegram_message(chat_id, cq["message"]["message_id"], (orig + "\n\n" + msg).strip())
+    except Exception:
+        logger.debug("no se pudo editar el mensaje de atención")
+
+
 @app.get("/whatsapp/webhook")
 async def whatsapp_verify(request: Request):
     params = request.query_params
@@ -935,18 +1230,36 @@ async def whatsapp_message(request: Request):
         if not validate_whatsapp_payload(data):
             return {"status": "ok"}
         message = data["entry"][0]["changes"][0]["value"]["messages"][0]
-        if message["type"] != "text":
-            return {"status": "ok"}
         from_number = message["from"]
-        raw_text = message["text"]["body"]
-        clean = validate_message_text(raw_text)
-        if clean is None:
-            if is_oversized(raw_text):
-                await _send_whatsapp(
-                    from_number,
-                    "Tu mensaje es demasiado largo (máximo 500 caracteres).",
-                )
+        mtype = message.get("type")
+        if mtype == "text":
+            raw_text = message["text"]["body"]
+        elif mtype == "interactive":
+            # Respuesta a botones interactivos: el id de la opción tocada se
+            # procesa como si el paciente hubiera escrito ese texto (p. ej. "2").
+            inter = message.get("interactive") or {}
+            reply = inter.get("button_reply") or inter.get("list_reply") or {}
+            raw_text = reply.get("id") or ""
+        else:
             return {"status": "ok"}
+    except (KeyError, IndexError, ValueError):
+        return {"status": "ok"}
+
+    # Idempotencia: Meta reintenta el webhook con el mismo message id (wamid).
+    wamid = message.get("id") if isinstance(message, dict) else None
+    if wamid and session_store.seen_whatsapp_message(wamid):
+        logger.debug("whatsapp webhook: wamid repetido, ignorado")
+        return {"status": "ok"}
+
+    clean = validate_message_text(raw_text)
+    if clean is None:
+        if is_oversized(raw_text):
+            await _send_whatsapp(
+                from_number,
+                "Tu mensaje es demasiado largo (máximo 500 caracteres).",
+            )
+        return {"status": "ok"}
+    try:
         t0 = time.monotonic()
         response = chatbot.handle_message("whatsapp", from_number, clean)
         duration_ms = (time.monotonic() - t0) * 1000
@@ -958,8 +1271,13 @@ async def whatsapp_message(request: Request):
             duration_ms=duration_ms,
         )
         await _send_whatsapp(from_number, response)
-    except (KeyError, IndexError, ValueError):
-        pass
+    except Exception as e:
+        logger.error("whatsapp webhook: message handling error", extra={"error": str(e)})
+        _reset_user_session(from_number)
+        try:
+            await _send_whatsapp(from_number, chatbot.MENSAJES["error_interno"])
+        except Exception:
+            logger.debug("no se pudo avisar al usuario del error")
     return {"status": "ok"}
 
 
@@ -972,6 +1290,14 @@ async def telegram_webhook(request: Request):
         logger.warning("telegram webhook rejected: secret mismatch")
         return JSONResponse(status_code=403, content={"error": "forbidden"})
     data = await request.json()
+
+    # Idempotencia: Telegram reenvía el mismo update_id si tardamos en responder
+    # 200. Descartamos el reintento para no duplicar respuestas ni efectos
+    # (notificaciones, etc.). Cubre tanto mensajes como callbacks de botones.
+    update_id = data.get("update_id") if isinstance(data, dict) else None
+    if update_id is not None and session_store.seen_update(update_id):
+        logger.debug("telegram webhook: update_id repetido, ignorado")
+        return {"status": "ok"}
 
     # Updates de botones inline (callback_query): el callback_data del botón
     # se procesa igual que texto del usuario — misma sanitización y rate limit.
@@ -986,6 +1312,13 @@ async def telegram_webhook(request: Request):
         if clean is None:
             # callback_data inválido u oversized solo puede ser un payload
             # forjado (los botones legítimos llevan datos cortos): se ignora
+            return {"status": "ok"}
+        # Prompt de atención post-cita: estos botones marcan el estado de la cita
+        # y SOLO los puede usar la terapeuta. No se enrutan a la conversación.
+        if clean.startswith("att|"):
+            await _answer_telegram_callback(cq["id"])
+            if user_id == str(ADMIN_USER_ID):
+                await _handle_attendance_callback(cq, clean, chat_id)
             return {"status": "ok"}
         # Registro de la elección: dejar el mensaje original mostrando la opción
         # tocada y sacarle el teclado (así no se pierde lo que el usuario eligió
@@ -1013,8 +1346,13 @@ async def telegram_webhook(request: Request):
             )
             text, markup = build_message(response)
             await _send_telegram(chat_id, text, reply_markup=markup)
-        except (KeyError, TypeError) as e:
+        except Exception as e:
             logger.error("telegram webhook: callback handling error", extra={"error": str(e)})
+            _reset_user_session(user_id)
+            try:
+                await _send_telegram(chat_id, chatbot.MENSAJES["error_interno"])
+            except Exception:
+                logger.debug("no se pudo avisar al usuario del error")
         return {"status": "ok"}
 
     if not validate_telegram_payload(data):
@@ -1045,8 +1383,13 @@ async def telegram_webhook(request: Request):
         )
         text, markup = build_message(response)
         await _send_telegram(chat_id, text, reply_markup=markup)
-    except (KeyError, TypeError) as e:
+    except Exception as e:
         logger.error("telegram webhook: message handling error", extra={"error": str(e)})
+        _reset_user_session(user_id)
+        try:
+            await _send_telegram(chat_id, chatbot.MENSAJES["error_interno"])
+        except Exception:
+            logger.debug("no se pudo avisar al usuario del error")
     return {"status": "ok"}
 
 

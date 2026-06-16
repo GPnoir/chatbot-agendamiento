@@ -6,7 +6,7 @@ from typing import Optional
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
 
-from config import SERVICIOS, PROFESIONALES, HORARIOS_DEFAULT
+from config import SERVICIOS, PROFESIONALES, HORARIOS_DEFAULT, TRAMO_DEFAULT, TRAMOS_PRECIO
 import google_calendar
 
 TABLE_NAME = os.getenv("DYNAMODB_TABLE", "chatbot-agendamiento")
@@ -22,11 +22,14 @@ def get_table():
 
 
 def init_db():
-    """Seed data si la tabla está vacía."""
+    """Seed data si la tabla está vacía; si ya existe, sincroniza el catálogo."""
     table = get_table()
     # Check si ya hay servicios
     resp = table.query(KeyConditionExpression=Key("PK").eq("SERVICE"), Limit=1)
     if resp["Items"]:
+        # Tabla ya sembrada: aplicar cambios de catálogo (precios por tramo,
+        # servicios retirados) sin re-sembrar a mano.
+        _sync_catalogo_servicios(table)
         return
     # Seed servicios
     with table.batch_writer() as batch:
@@ -36,6 +39,7 @@ def init_db():
                 "id": i, "nombre": s["nombre"],
                 "duracion_min": s["duracion"],
                 "descripcion": s.get("descripcion", ""),
+                "precios": s.get("precios", {}),
                 "activo": True,
             })
         # Seed profesionales
@@ -53,6 +57,41 @@ def init_db():
                     "profesional_id": i, "dia_semana": dia,
                     "hora_inicio": h["inicio"], "hora_fin": h["fin"],
                 })
+
+
+def _sync_catalogo_servicios(table) -> None:
+    """Idempotente: actualiza el catálogo de servicios sobre una tabla ya
+    sembrada (precios por tramo) y desactiva los servicios retirados de config
+    (p. ej. 'Preparación de esencias'). Permite que cambios de catálogo lleguen
+    a producción sin re-sembrar a mano."""
+    # Upsert de los servicios vigentes (id estable por índice).
+    for i, s in enumerate(SERVICIOS, 1):
+        table.update_item(
+            Key={"PK": "SERVICE", "SK": f"SERVICE#{i}"},
+            UpdateExpression=(
+                "SET #n = :n, duracion_min = :d, descripcion = :de, "
+                "precios = :p, activo = :a, id = :id"
+            ),
+            ExpressionAttributeNames={"#n": "nombre"},
+            ExpressionAttributeValues={
+                ":n": s["nombre"], ":d": s["duracion"],
+                ":de": s.get("descripcion", ""), ":p": s.get("precios", {}),
+                ":a": True, ":id": i,
+            },
+        )
+    # Desactivar cualquier SERVICE# con índice mayor al catálogo actual.
+    resp = table.query(KeyConditionExpression=Key("PK").eq("SERVICE"))
+    for it in resp.get("Items", []):
+        try:
+            idx = int(it.get("id", 0))
+        except (TypeError, ValueError):
+            continue
+        if idx > len(SERVICIOS) and it.get("activo"):
+            table.update_item(
+                Key={"PK": it["PK"], "SK": it["SK"]},
+                UpdateExpression="SET activo = :a",
+                ExpressionAttributeValues={":a": False},
+            )
 
 
 def get_servicios() -> list[dict]:
@@ -100,6 +139,10 @@ def get_or_create_cliente(canal: str, canal_user_id: str, nombre: str = None) ->
 def get_horas_disponibles(profesional_id: int, fecha: date, servicio_duracion: int) -> list[str]:
     """Retorna horas disponibles para un profesional en una fecha, validando solapamiento y bloqueos."""
     table = get_table()
+    # DynamoDB devuelve los números como Decimal: si la duración llega leída
+    # fresca de la tabla (p. ej. al reagendar), timedelta() la rechaza. La
+    # normalizamos a int para proteger a todos los llamadores.
+    servicio_duracion = int(servicio_duracion)
     dia_semana = fecha.weekday()
     fecha_str = fecha.isoformat()
 
@@ -161,8 +204,57 @@ def get_fechas_disponibles(profesional_id: int, servicio_duracion: int, dias: in
     return fechas
 
 
+class SlotNoDisponibleError(Exception):
+    """El horario solicitado para el profesional ya está reservado.
+
+    Se levanta cuando no se puede tomar el lock atómico del slot (otra cita
+    confirmada lo ocupa). Evita la doble reserva del mismo horario.
+    """
+
+    def __init__(self, profesional_id, fecha: str, hora: str):
+        self.profesional_id = profesional_id
+        self.fecha = fecha
+        self.hora = hora
+        super().__init__(f"Slot ocupado: prof {profesional_id} {fecha} {hora}")
+
+
+def _slot_pk(profesional_id, fecha: str, hora: str) -> str:
+    return f"SLOT#{profesional_id}#{fecha}#{hora}"
+
+
+def _acquire_slot(table, profesional_id, fecha: str, hora: str, cliente_id) -> None:
+    """Reserva atómica del horario del profesional: un único confirmado por slot.
+
+    Usa una escritura condicional sobre un ítem-lock dedicado. Si ya existe
+    (otra cita tomó el horario), lanza SlotNoDisponibleError.
+    """
+    try:
+        table.put_item(
+            Item={
+                "PK": _slot_pk(profesional_id, fecha, hora),
+                "SK": "LOCK",
+                "cliente_id": cliente_id,
+                "profesional_id": profesional_id,
+                "fecha": fecha,
+                "hora": hora,
+                "created_at": datetime.utcnow().isoformat(),
+            },
+            ConditionExpression=Attr("PK").not_exists(),
+        )
+    except table.meta.client.exceptions.ConditionalCheckFailedException:
+        raise SlotNoDisponibleError(profesional_id, fecha, hora)
+
+
+def _release_slot(table, profesional_id, fecha: str, hora: str) -> None:
+    """Libera el lock del horario (al cancelar o reagendar)."""
+    table.delete_item(Key={"PK": _slot_pk(profesional_id, fecha, hora), "SK": "LOCK"})
+
+
 def crear_cita(cliente_id: str, servicio_id: int, profesional_id: int, fecha: str, hora: str) -> dict:
     table = get_table()
+    # Tomar el lock del slot ANTES de escribir: garantiza que dos reservas
+    # simultáneas (race / reintentos de webhook) no dupliquen el horario.
+    _acquire_slot(table, profesional_id, fecha, hora, cliente_id)
     cita_id = f"{fecha}#{hora}#{profesional_id}"
     item = {
         "PK": f"APPOINTMENT#{cliente_id}",
@@ -185,16 +277,29 @@ def crear_cita(cliente_id: str, servicio_id: int, profesional_id: int, fecha: st
     if serv:
         item["servicio_nombre"] = serv["nombre"]
         item["servicio_duracion"] = serv["duracion_min"]
+        # Snapshot del tramo y precio: la cita conserva su valor histórico aunque
+        # luego cambien los precios. El tramo arranca en "adulto" y la terapeuta
+        # lo ajusta desde el panel.
+        precios = serv.get("precios") or {}
+        item["tramo"] = TRAMO_DEFAULT
+        if TRAMO_DEFAULT in precios:
+            item["precio"] = precios[TRAMO_DEFAULT]
     profesionales = get_profesionales()
     prof = next((p for p in profesionales if p["id"] == profesional_id), None)
     if prof:
         item["profesional_nombre"] = prof["nombre"]
-    # Sync best-effort a Google Calendar (issue #14): guardamos el event id
-    # para poder borrar/actualizar el evento al cancelar o modificar la cita.
-    event_id = google_calendar.sync_create(item)
-    if event_id:
-        item["gcal_event_id"] = event_id
-    table.put_item(Item=item)
+    try:
+        # Sync best-effort a Google Calendar (issue #14): guardamos el event id
+        # para poder borrar/actualizar el evento al cancelar o modificar la cita.
+        event_id = google_calendar.sync_create(item)
+        if event_id:
+            item["gcal_event_id"] = event_id
+        table.put_item(Item=item)
+    except Exception:
+        # Si falla la escritura de la cita, liberamos el lock para no dejar el
+        # horario bloqueado sin una cita real detrás.
+        _release_slot(table, profesional_id, fecha, hora)
+        raise
     return item
 
 
@@ -268,6 +373,9 @@ def cancelar_cita(cita_pk: str, cita_sk: str):
     # Sync best-effort a Google Calendar (issue #14): borra el evento asociado.
     if item and item.get("gcal_event_id"):
         google_calendar.sync_cancel(item["gcal_event_id"])
+    # Liberar el lock del slot para que el horario vuelva a estar disponible.
+    if item:
+        _release_slot(table, item["profesional_id"], item["fecha"], item["hora"])
 
 
 def modificar_cita(cita_pk: str, cita_sk: str, nueva_fecha: str, nueva_hora: str):
@@ -277,10 +385,79 @@ def modificar_cita(cita_pk: str, cita_sk: str, nueva_fecha: str, nueva_hora: str
     if "Item" not in resp:
         return
     cita = resp["Item"]
-    # Cancelar la vieja
-    cancelar_cita(cita_pk, cita_sk)
-    # Crear nueva
+    # Reagendar al mismo horario: no hay nada que cambiar (y evita que el lock
+    # del propio slot choque consigo mismo).
+    if cita["fecha"] == nueva_fecha and cita["hora"] == nueva_hora:
+        return
+    # Crear la nueva PRIMERO: si el horario está ocupado, crear_cita lanza
+    # SlotNoDisponibleError y la cita original queda intacta (no se pierde).
     crear_cita(cita["cliente_id"], cita["servicio_id"], cita["profesional_id"], nueva_fecha, nueva_hora)
+    # Recién entonces cancelar la vieja (libera su slot).
+    cancelar_cita(cita_pk, cita_sk)
+
+
+def actualizar_tramo_cita(cita_pk: str, cita_sk: str, tramo: str) -> None:
+    """Asigna el tramo de precio de una cita y recalcula su precio snapshot.
+
+    Lo usa el panel para registrar la categoría del paciente (convenio TEA/TDAH,
+    niño o adulto particular). Lanza ValueError si el tramo no existe.
+    """
+    if tramo not in TRAMOS_PRECIO:
+        raise ValueError(f"Tramo inválido: {tramo}")
+    table = get_table()
+    resp = table.get_item(Key={"PK": cita_pk, "SK": cita_sk})
+    item = resp.get("Item")
+    if not item:
+        return
+    servicios = get_servicios()
+    serv = next((s for s in servicios if s["id"] == item.get("servicio_id")), None)
+    precios = (serv or {}).get("precios") or {}
+    update = "SET tramo = :t, updated_at = :u"
+    values = {":t": tramo, ":u": datetime.utcnow().isoformat()}
+    if tramo in precios:
+        update += ", precio = :p"
+        values[":p"] = precios[tramo]
+    table.update_item(Key={"PK": cita_pk, "SK": cita_sk},
+                      UpdateExpression=update, ExpressionAttributeValues=values)
+
+
+# Estados que la terapeuta puede marcar desde el panel (validar la atención).
+# 'cancelada' NO está acá: tiene su propio camino (cancelar_cita) que libera el
+# slot y borra el evento del calendar.
+ESTADOS_ATENCION = ("confirmada", "completada", "no_show")
+
+
+def buscar_cita_por_slot(profesional_id, fecha: str, hora: str) -> Optional[dict]:
+    """Busca la cita de un slot (prof + fecha + hora) vía GSI1. Devuelve la no
+    cancelada si hay varias. Lo usa el prompt de atención para resolver el token
+    del botón a la cita real."""
+    table = get_table()
+    resp = table.query(
+        IndexName="GSI1",
+        KeyConditionExpression=Key("GSI1PK").eq(f"APPT#PROF#{profesional_id}")
+        & Key("GSI1SK").eq(f"DATE#{fecha}#{hora}"),
+    )
+    items = resp.get("Items", [])
+    for it in items:
+        if it.get("estado") != "cancelada":
+            return it
+    return items[0] if items else None
+
+
+def marcar_estado_cita(cita_pk: str, cita_sk: str, estado: str) -> None:
+    """Marca el estado de atención de una cita (completada / no_show / confirmada).
+
+    Lo usa el panel para registrar si la sesión se realizó. Lanza ValueError si
+    el estado no es uno de los permitidos (para cancelar, usar cancelar_cita).
+    """
+    if estado not in ESTADOS_ATENCION:
+        raise ValueError(f"Estado inválido: {estado}")
+    table = get_table()
+    table.update_item(
+        Key={"PK": cita_pk, "SK": cita_sk},
+        UpdateExpression="SET estado = :e, updated_at = :u",
+        ExpressionAttributeValues={":e": estado, ":u": datetime.utcnow().isoformat()},
+    )
 
 
 def get_citas_rango(desde: str, hasta: str) -> list[dict]:
@@ -304,23 +481,74 @@ def get_citas_rango(desde: str, hasta: str) -> list[dict]:
     return sorted(items, key=lambda x: (x["fecha"], x["hora"]))
 
 
-def resumen_citas_rango(desde: str, hasta: str) -> dict:
-    """Agrega métricas de citas en un rango de fechas (issue #15).
+def _hhmm_a_min(hhmm: str) -> int:
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
 
-    Retorna: total, por_estado (estado → cantidad), por_servicio
-    (nombre → cantidad) y tasa_cancelacion (canceladas / total, 0.0 si
-    no hay citas).
+
+def _capacidad_min_rango(desde: str, hasta: str) -> int:
+    """Minutos de atención disponibles según HORARIOS_DEFAULT en el rango."""
+    d = date.fromisoformat(desde)
+    fin = date.fromisoformat(hasta)
+    total = 0
+    while d <= fin:
+        horario = HORARIOS_DEFAULT.get(d.weekday())
+        if horario:
+            total += max(0, _hhmm_a_min(horario["fin"]) - _hhmm_a_min(horario["inicio"]))
+        d += timedelta(days=1)
+    return total
+
+
+def resumen_citas_rango(desde: str, hasta: str) -> dict:
+    """Agrega métricas de negocio de citas en un rango (issues #15 + métricas).
+
+    Devuelve, además de los conteos base (total, por_estado, por_servicio,
+    tasa_cancelacion):
+    - tasa_no_show
+    - facturacion (suma de `precio` de las completadas) + ingresos_por_servicio
+    - pacientes_nuevos vs pacientes_recurrentes (primera cita histórica dentro
+      del rango = nuevo)
+    - horas_ocupadas vs horas_disponibles y ocupacion (0..1)
+    Solo las citas *completadas* cuentan como facturación.
     """
     citas = get_citas_rango(desde, hasta)
     por_estado: dict[str, int] = {}
     por_servicio: dict[str, int] = {}
+    ingresos_por_servicio: dict[str, int] = {}
+    facturacion = 0
+    ocupadas_min = 0
+    clientes: set = set()
     for c in citas:
         estado = c.get("estado", "desconocido")
         por_estado[estado] = por_estado.get(estado, 0) + 1
         servicio = c.get("servicio_nombre", "Sin servicio")
         por_servicio[servicio] = por_servicio.get(servicio, 0) + 1
+        if c.get("cliente_id"):
+            clientes.add(c["cliente_id"])
+        if estado != "cancelada":
+            ocupadas_min += int(c.get("servicio_duracion", 60) or 60)
+        if estado == "completada":
+            precio = int(c.get("precio", 0) or 0)
+            facturacion += precio
+            ingresos_por_servicio[servicio] = ingresos_por_servicio.get(servicio, 0) + precio
+
+    # Pacientes nuevos vs recurrentes: nuevo si su primera cita histórica
+    # (cualquier estado) cae dentro del rango.
+    nuevos = recurrentes = 0
+    for cid in clientes:
+        hist = get_historial_cliente(cid)
+        if not hist:
+            continue
+        primera = min(h["fecha"] for h in hist)
+        if primera >= desde:
+            nuevos += 1
+        else:
+            recurrentes += 1
+
     total = len(citas)
     canceladas = por_estado.get("cancelada", 0)
+    no_shows = por_estado.get("no_show", 0)
+    cap_min = _capacidad_min_rango(desde, hasta)
     return {
         "desde": desde,
         "hasta": hasta,
@@ -328,6 +556,14 @@ def resumen_citas_rango(desde: str, hasta: str) -> dict:
         "por_estado": por_estado,
         "por_servicio": por_servicio,
         "tasa_cancelacion": (canceladas / total) if total else 0.0,
+        "tasa_no_show": (no_shows / total) if total else 0.0,
+        "facturacion": facturacion,
+        "ingresos_por_servicio": ingresos_por_servicio,
+        "pacientes_nuevos": nuevos,
+        "pacientes_recurrentes": recurrentes,
+        "horas_ocupadas": round(ocupadas_min / 60, 1),
+        "horas_disponibles": round(cap_min / 60, 1),
+        "ocupacion": (ocupadas_min / cap_min) if cap_min else 0.0,
     }
 
 

@@ -51,10 +51,27 @@ NEGOCIO = {
     "descripcion": "Terapia floral personalizada",
 }
 
+# Tramos de precio (CLP) por categoría de paciente. El tramo de cada cita lo
+# asigna la terapeuta en el panel; la cita se crea por defecto como "adulto".
+TRAMOS_PRECIO = ["convenio_tea", "nino", "adulto"]
+TRAMO_DEFAULT = "adulto"
+TRAMO_LABELS = {
+    "convenio_tea": "Convenio TEA/TDAH",
+    "nino": "Niño particular",
+    "adulto": "Adulto particular",
+}
+
 SERVICIOS = [
-    {"nombre": "Consulta inicial", "duracion": 60, "descripcion": "Evaluación completa y primera fórmula"},
-    {"nombre": "Sesión de seguimiento", "duracion": 30, "descripcion": "Control y ajuste de fórmula"},
-    {"nombre": "Preparación de esencias", "duracion": 45, "descripcion": "Preparación personalizada sin consulta"},
+    {
+        "nombre": "Consulta inicial", "duracion": 60,
+        "descripcion": "Evaluación completa y primera fórmula",
+        "precios": {"convenio_tea": 10000, "nino": 15000, "adulto": 20000},
+    },
+    {
+        "nombre": "Sesión de seguimiento", "duracion": 30,
+        "descripcion": "Control y ajuste de fórmula",
+        "precios": {"convenio_tea": 8000, "nino": 12000, "adulto": 18000},
+    },
 ]
 
 PROFESIONALES = [
@@ -77,4 +94,5 @@ MENSAJES = {
     "cita_confirmada": "✅ Cita agendada:\n📋 {servicio}\n👩‍⚕️ {profesional}\n📅 {fecha} a las {hora}",
     "cita_cancelada": "❌ Cita del {fecha} a las {hora} cancelada.",
     "error": "No entendí tu respuesta. Por favor elige una opción válida.",
+    "error_interno": "🌸 Ups, algo salió mal de mi lado. Escribe *menu* para empezar de nuevo.",
 }

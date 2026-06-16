@@ -10,7 +10,7 @@ Chatbot multicanal (Telegram + WhatsApp) para agendamiento de citas. Desplegado 
 - Infra: AWS SAM (Lambda + API Gateway + DynamoDB)
 - Channels: Telegram Bot API, WhatsApp Cloud API (Meta)
 - Testing: pytest 9.0.3 (asyncio_mode=auto)
-- CI/CD: GitHub Actions → SAM deploy
+- CI/CD: GitHub Actions (runners **GitHub-hosted ubuntu**) → SAM deploy
 - Database: DynamoDB (local: SQLite fallback via database.py)
 
 ## Architecture
@@ -21,11 +21,13 @@ Chatbot multicanal (Telegram + WhatsApp) para agendamiento de citas. Desplegado 
 - `channels/whatsapp_bot.py` — WhatsApp implementation
 - `chatbot.py` — business logic (servicios, horarios, citas)
 - `chatbot_lambda.py` — Lambda-specific handler
-- `lambda_handler.py` — API Gateway event routing
-- `database_dynamo.py` — DynamoDB persistence
+- `lambda_handler.py` — API Gateway routing + **panel admin web** (`/admin/*`)
+- `database_dynamo.py` — DynamoDB persistence (citas, clientes, notas)
 - `database.py` — local SQLite persistence
 - `config.py` — environment + business config
 - `rate_limiter.py` — per-user rate limiting
+- `admin_auth.py` — auth del panel admin (hash PBKDF2 + tokens de sesión firmados)
+- `telegram_ui.py` — inline keyboards + armado de mensajes (`build_message`, `button_label`)
 
 ## Security Rules — NEVER VIOLATE
 
@@ -51,11 +53,17 @@ pytest tests/playwright/                  # E2E tests (Playwright)
 # Local dev
 python main.py                            # Local server (port 8000)
 
+# Panel admin (auth): generar credenciales
+python scripts/hash_admin_password.py     # imprime ADMIN_PASSWORD_HASH + SESSION_SECRET
+
 # Deploy
 ./deploy.sh                               # SAM build + deploy
 sam build                                 # Build only
 sam local invoke                          # Test Lambda locally
 ```
+
+> El deploy real corre en CI (push a `main`); `deploy.sh` es para deploy manual.
+> Panel admin: `GET /admin/panel` (login usuario+contraseña).
 
 ## Testing Strategy
 
@@ -67,7 +75,19 @@ sam local invoke                          # Test Lambda locally
 
 ## Business Domain
 
-- Servicios: Consulta inicial (60min), Seguimiento (30min), Preparación esencias (45min)
+- Servicios: Consulta inicial (60min), Sesión de seguimiento (30min).
+  ("Preparación de esencias" se retiró del catálogo; se desactiva vía
+  `_sync_catalogo_servicios`, las citas históricas se conservan.)
+- Precios por tramo (CLP), snapshot en cada cita (`config.TRAMOS_PRECIO`):
+  convenio TEA/TDAH · niño particular · adulto particular. Consulta inicial:
+  10.000 / 15.000 / 20.000. Seguimiento: 8.000 / 12.000 / 18.000. La cita nace
+  como `adulto`; la terapeuta ajusta el tramo en el panel (`actualizar_tramo_cita`).
+- Estados de cita: `confirmada` → `completada` | `no_show` | `cancelada`. La
+  terapeuta marca realizada/no-asistió desde el panel (`marcar_estado_cita`) o
+  con un toque desde el auto-prompt de Telegram (`attendance_prompt.py`, Lambda
+  programada que ~1h después de la cita le pregunta si se realizó; el botón
+  entra por el webhook con callback `att|<estado>|<slot>`);
+  `cancelada` libera el slot y borra el evento del calendar.
 - Profesional: Terapeuta Nelly Pailacura
 - Max citas por cliente: 3
 - Channels: Telegram + WhatsApp (same business logic, different adapters)
@@ -96,7 +116,7 @@ All initial gaps resolved (June 2026):
 2. ~~Weak input sanitization~~ → input_validation.py (length, control chars, structural)
 3. ~~No body size limits~~ → _BodySizeLimitMiddleware (413 over 1 MiB)
 4. ~~No CORS~~ → CORSMiddleware via CORS_ORIGINS config
-5. ~~Weak admin auth~~ → Bearer ADMIN_API_KEY with hmac.compare_digest
+5. ~~Weak admin auth~~ → login usuario+contraseña (PBKDF2) + token de sesión firmado HMAC (admin_auth.py); ADMIN_API_KEY queda como break-glass para automatización
 6. ~~No structured logging~~ → aws-lambda-powertools (observability.py)
 7. ~~No alarms~~ → CloudWatch alarms in template.yaml + optional AlarmEmail
 
@@ -120,11 +140,29 @@ Sistema de diseño "papel neutro + acento botánico" documentado en `PRODUCT.md`
 y `DESIGN.md` (tokens OKLCH, tipografía serif+sans del sistema, motion, bans).
 Antes de tocar UI, leerlos. Aplica a:
 
-- **Portal admin** (`/admin/panel` en lambda_handler.py): login shell + 2 vistas
-  client-side (Agenda semanal + Reporte). El shell NO embebe datos ni secretos
-  (contrato cubierto por tests en test_security_and_overlap.py).
+- **Portal admin** (`/admin/panel` en lambda_handler.py): app web client-side con
+  **login usuario+contraseña** (sesión firmada, ver `admin_auth.py`) y menú
+  hamburguesa con 4 destinos:
+  - **Agenda** semanal interactiva (click en una cita → panel de detalle:
+    marcar realizada / no asistió, asignar tramo de precio, o cancelar). Muestra
+    confirmadas + atendidas (✓ realizada, ✕ no-show); oculta canceladas.
+  - **Reporte** (dashboard de métricas sobre `/admin/reporte`).
+  - **Fichas** de pacientes (lista + buscador → ficha con histórico de citas,
+    notas del terapeuta y **contacto**: link wa.me para WhatsApp y envío de
+    mensaje vía el bot, con botones opcionales de reagendar/cancelar).
+  - **Cerrar sesión**.
+
+  El shell NO embebe datos ni secretos (contrato cubierto en
+  test_security_and_overlap.py). Endpoints admin (todos con auth; **cada uno
+  declarado como ruta `Api` en template.yaml** o API Gateway responde 403 en prod):
+  `/admin/login`, `/admin/agenda`, `/admin/reporte`, `/admin/cita/cancelar`,
+  `/admin/cita/estado`, `/admin/cita/tramo`, `/admin/clientes`, `/admin/cliente`,
+  `/admin/cliente/nota`, `/admin/cliente/mensaje`.
 - **Chatbot**: la "UI" es copy + estructura de mensajes (config.MENSAJES) +
-  botones inline (telegram_ui.py). Voz definida en PRODUCT.md.
+  botones inline (telegram_ui.py). `build_message` arma texto+teclado **sin
+  duplicar** las opciones numeradas; al tocar un botón el mensaje se edita para
+  registrar la elección; pasos críticos (cancelar, reagendar) piden confirmación.
+  Voz definida en PRODUCT.md.
 
 Para iterar diseño usar la skill `impeccable` (sub-comandos: critique, polish,
 craft, ...).

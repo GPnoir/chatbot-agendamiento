@@ -75,6 +75,56 @@ class TestResumenCitasRango:
         assert resumen["tasa_cancelacion"] == 0.0
         assert resumen["por_estado"] == {}
         assert resumen["por_servicio"] == {}
+        assert resumen["facturacion"] == 0
+        assert resumen["pacientes_nuevos"] == 0
+        assert resumen["ocupacion"] == 0.0 or resumen["horas_disponibles"] >= 0
+
+
+class TestMetricasNegocio:
+    """Métricas para gestión: facturación, nuevos/recurrentes, no-show, ocupación."""
+
+    def _seed(self):
+        # Recurrente: primera cita hace 30 días (fuera de rango) + 1 completada dentro.
+        a = db.get_or_create_cliente("telegram", "met_a", "Ana")
+        db.crear_cita(a["id"], 1, 1, _fecha(30), "10:00")
+        c_a = db.crear_cita(a["id"], 1, 1, _fecha(2), "10:00")  # Consulta inicial → 20000
+        db.marcar_estado_cita(c_a["PK"], c_a["SK"], "completada")
+        # Nuevo: solo citas dentro del rango (1 completada de seguimiento + 1 no_show).
+        b = db.get_or_create_cliente("telegram", "met_b", "Beto")
+        c_b = db.crear_cita(b["id"], 2, 1, _fecha(3), "11:00")  # Seguimiento → 18000
+        db.marcar_estado_cita(c_b["PK"], c_b["SK"], "completada")
+        c_ns = db.crear_cita(b["id"], 1, 1, _fecha(1), "09:00")
+        db.marcar_estado_cita(c_ns["PK"], c_ns["SK"], "no_show")
+        return a, b
+
+    def test_facturacion_solo_completadas(self):
+        self._seed()
+        r = db.resumen_citas_rango(_fecha(7), _fecha(0))
+        assert r["facturacion"] == 20000 + 18000
+
+    def test_ingresos_por_servicio(self):
+        self._seed()
+        r = db.resumen_citas_rango(_fecha(7), _fecha(0))
+        assert r["ingresos_por_servicio"]["Consulta inicial"] == 20000
+        assert r["ingresos_por_servicio"]["Sesión de seguimiento"] == 18000
+
+    def test_nuevos_vs_recurrentes(self):
+        self._seed()
+        r = db.resumen_citas_rango(_fecha(7), _fecha(0))
+        assert r["pacientes_recurrentes"] == 1
+        assert r["pacientes_nuevos"] == 1
+
+    def test_tasa_no_show(self):
+        self._seed()
+        r = db.resumen_citas_rango(_fecha(7), _fecha(0))
+        assert r["por_estado"].get("no_show") == 1
+        assert r["tasa_no_show"] == pytest.approx(1 / 3)
+
+    def test_ocupacion_acotada(self):
+        self._seed()
+        r = db.resumen_citas_rango(_fecha(7), _fecha(0))
+        assert r["horas_disponibles"] > 0
+        assert 0 < r["ocupacion"] <= 1
 
 
 # ---------------------------------------------------------------------------

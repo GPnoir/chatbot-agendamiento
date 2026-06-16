@@ -198,6 +198,16 @@ Resources:
           Properties:
             Path: /admin/cita/cancelar
             Method: post
+        AdminMarcarEstado:
+          Type: Api
+          Properties:
+            Path: /admin/cita/estado
+            Method: post
+        AdminAsignarTramo:
+          Type: Api
+          Properties:
+            Path: /admin/cita/tramo
+            Method: post
         AdminClientes:
           Type: Api
           Properties:
@@ -213,6 +223,11 @@ Resources:
           Properties:
             Path: /admin/cliente/nota
             Method: post
+        AdminEnviarMensaje:
+          Type: Api
+          Properties:
+            Path: /admin/cliente/mensaje
+            Method: post
 
   # ── Reminder Lambda ────────────────────────────────────────────────
   ReminderFunction:
@@ -220,6 +235,21 @@ Resources:
     Properties:
       FunctionName: chatbot-reminder
       Handler: reminder_handler.handler
+      CodeUri: .
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ChatbotTable
+      Events:
+        HourlyCheck:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 hour)
+
+  AttendancePromptFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: chatbot-attendance-prompt
+      Handler: attendance_prompt.handler
       CodeUri: .
       Policies:
         - DynamoDBCrudPolicy:
