@@ -829,8 +829,8 @@ function detailActions(){
   var c=window._detailCita;if(!c){return}
   var est=c.estado||"confirmada";
   var h="<div class='detail-group'><span class='detail-glabel'>¿Se realizó la atención?</span><div class='confirm-row'>";
-  h+="<button class='btn-ghost"+(est==="completada"?" is-active":"")+"' onclick=\"setEstado('completada')\">Realizada</button>";
-  h+="<button class='btn-ghost"+(est==="no_show"?" is-active":"")+"' onclick=\"setEstado('no_show')\">No asistió</button>";
+  h+="<button class='btn-ghost"+(est==="completada"?" is-active":"")+"' onclick=\\"setEstado('completada')\\">Realizada</button>";
+  h+="<button class='btn-ghost"+(est==="no_show"?" is-active":"")+"' onclick=\\"setEstado('no_show')\\">No asistió</button>";
   h+="</div></div>";
   h+="<div class='detail-group'><span class='detail-glabel'>Categoría del paciente (precio)</span>";
   h+="<select class='detail-select' onchange='setTramo(this.value)'>";
