@@ -420,6 +420,7 @@ async def admin_panel():
     """
     html = """<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Agenda — Centro de Flores de Bach</title>
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+PGcgZmlsbD0nIzNlNzI1Nic+PGVsbGlwc2UgY3g9JzEyJyBjeT0nNi40JyByeD0nMi41JyByeT0nNC4xJy8+PGVsbGlwc2UgY3g9JzEyJyBjeT0nNi40JyByeD0nMi41JyByeT0nNC4xJyB0cmFuc2Zvcm09J3JvdGF0ZSg3MiAxMiAxMiknLz48ZWxsaXBzZSBjeD0nMTInIGN5PSc2LjQnIHJ4PScyLjUnIHJ5PSc0LjEnIHRyYW5zZm9ybT0ncm90YXRlKDE0NCAxMiAxMiknLz48ZWxsaXBzZSBjeD0nMTInIGN5PSc2LjQnIHJ4PScyLjUnIHJ5PSc0LjEnIHRyYW5zZm9ybT0ncm90YXRlKDIxNiAxMiAxMiknLz48ZWxsaXBzZSBjeD0nMTInIGN5PSc2LjQnIHJ4PScyLjUnIHJ5PSc0LjEnIHRyYW5zZm9ybT0ncm90YXRlKDI4OCAxMiAxMiknLz48L2c+PGNpcmNsZSBjeD0nMTInIGN5PScxMicgcj0nMi4zJyBmaWxsPScjMzQ1ZjQ4Jy8+PC9zdmc+">
 <style>
 :root{
   --bg:oklch(0.985 0.003 200);
