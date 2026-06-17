@@ -103,6 +103,54 @@ def get_servicios() -> list[dict]:
     return resp["Items"]
 
 
+def get_precios_por_servicio() -> dict:
+    """Mapa {servicio_id(int): {tramo: precio(int)}} con los precios vigentes.
+
+    Sirve para resolver el precio de una cita cuando le falta el snapshot
+    (citas creadas antes de que se guardara `precio`).
+    """
+    out: dict = {}
+    for s in get_servicios():
+        try:
+            sid = int(s.get("id"))
+        except (TypeError, ValueError):
+            continue
+        precios = s.get("precios") or {}
+        out[sid] = {k: int(v) for k, v in precios.items()}
+    return out
+
+
+def precio_efectivo(cita: dict, precios_por_servicio: Optional[dict] = None) -> Optional[int]:
+    """Precio a mostrar/contabilizar para una cita.
+
+    Usa el snapshot `precio` si está; si falta (cita vieja), lo deriva del
+    `tramo` de la cita (por defecto 'adulto') contra los precios vigentes del
+    servicio. Así el panel nunca muestra '-' con el tramo por defecto y los
+    reportes contabilizan también las citas sin snapshot.
+    """
+    precio = cita.get("precio")
+    if precio not in (None, ""):
+        try:
+            p = int(precio)
+            if p > 0:
+                return p
+        except (TypeError, ValueError):
+            pass
+    if precios_por_servicio is None:
+        precios_por_servicio = get_precios_por_servicio()
+    try:
+        sid = int(cita.get("servicio_id"))
+    except (TypeError, ValueError):
+        return None
+    precios = precios_por_servicio.get(sid) or {}
+    tramo = cita.get("tramo") or TRAMO_DEFAULT
+    if tramo in precios:
+        return precios[tramo]
+    if TRAMO_DEFAULT in precios:
+        return precios[TRAMO_DEFAULT]
+    return None
+
+
 def get_profesionales() -> list[dict]:
     table = get_table()
     resp = table.query(
@@ -512,6 +560,7 @@ def resumen_citas_rango(desde: str, hasta: str) -> dict:
     Solo las citas *completadas* cuentan como facturación.
     """
     citas = get_citas_rango(desde, hasta)
+    precios_map = get_precios_por_servicio()
     por_estado: dict[str, int] = {}
     por_servicio: dict[str, int] = {}
     ingresos_por_servicio: dict[str, int] = {}
@@ -528,7 +577,8 @@ def resumen_citas_rango(desde: str, hasta: str) -> dict:
         if estado != "cancelada":
             ocupadas_min += int(c.get("servicio_duracion", 60) or 60)
         if estado == "completada":
-            precio = int(c.get("precio", 0) or 0)
+            # Deriva el precio del tramo si la cita no tiene snapshot (citas viejas).
+            precio = precio_efectivo(c, precios_map) or 0
             facturacion += precio
             ingresos_por_servicio[servicio] = ingresos_por_servicio.get(servicio, 0) + precio
 

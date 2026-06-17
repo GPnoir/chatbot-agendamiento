@@ -342,6 +342,38 @@ class TestAdminPanelAuth:
         result = subprocess.run([node, "--check", js_path], capture_output=True, text=True)
         assert result.returncode == 0, f"JS del panel inválido:\n{result.stderr}"
 
+    def test_panel_fmt_usa_fecha_local_no_utc(self, lambda_client):
+        """`fmt()` debe devolver la fecha LOCAL, no la UTC.
+
+        Regresión: usaba `toISOString()`, que pasa a UTC. En Chile (UTC-4), de
+        noche la hora local + 4h cruza la medianoche → fmt() devolvía el día
+        siguiente, descolocando las citas en el agenda (≠ a la ficha) y corriendo
+        el rango del reporte. Se evalúa fmt() con node en TZ America/Santiago a
+        las 22:00 y debe dar el mismo día.
+        """
+        import os
+        import re
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node no disponible")
+
+        html = lambda_client.get("/admin/panel").text
+        m = re.search(r"function fmt\(d\)\{.*?\}", html)
+        assert m, "no se encontró la función fmt()"
+        prog = (
+            m.group(0)
+            + ";var r=fmt(new Date(2026,5,16,22,0,0));"
+            + "if(r!=='2026-06-16'){console.error('fmt devolvió',r);process.exit(1)}"
+        )
+        env = {**os.environ, "TZ": "America/Santiago"}
+        result = subprocess.run([node, "-e", prog], capture_output=True, text=True, env=env)
+        assert result.returncode == 0, (
+            f"fmt() corrió la fecha en TZ negativa: {result.stderr or result.stdout}"
+        )
+
 
 class TestRateLimiter:
     def test_permite_hasta_limite(self):

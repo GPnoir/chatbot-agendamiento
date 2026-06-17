@@ -118,3 +118,27 @@ class TestAgendaIncluyeAtendidas:
         r = admin_client.get("/admin/agenda?fecha=2026-06-24", headers=AUTH)
         assert r.status_code == 200
         assert r.json()["citas"] == []
+
+
+class TestAgendaSiempreTraePrecio:
+    """Regresión: el detalle del panel nunca debe quedar en '-'. El agenda
+    resuelve el precio efectivo (snapshot, o derivado del tramo por defecto)."""
+
+    def test_cita_nueva_trae_precio_snapshot(self, admin_client):
+        _crear_cita(uid="ag_precio_new", fecha="2026-06-25", hora="09:00")
+        r = admin_client.get("/admin/agenda?fecha=2026-06-25", headers=AUTH)
+        cita = r.json()["citas"][0]
+        assert cita["precio"] == 20000  # Consulta inicial adulto
+        assert cita["tramo"] == "adulto"
+
+    def test_cita_vieja_sin_snapshot_trae_precio_derivado(self, admin_client):
+        cita = _crear_cita(uid="ag_precio_old", fecha="2026-06-26", hora="09:00")
+        # Simula cita vieja: sin snapshot de precio.
+        db.get_table().update_item(
+            Key={"PK": cita["PK"], "SK": cita["SK"]},
+            UpdateExpression="REMOVE precio",
+        )
+        r = admin_client.get("/admin/agenda?fecha=2026-06-26", headers=AUTH)
+        cita_json = r.json()["citas"][0]
+        assert cita_json["precio"] == 20000  # derivado del tramo por defecto
+        assert cita_json.get("tramo") == "adulto"

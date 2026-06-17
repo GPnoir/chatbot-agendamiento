@@ -127,6 +127,48 @@ class TestMetricasNegocio:
         assert 0 < r["ocupacion"] <= 1
 
 
+class TestPrecioEfectivo:
+    """precio_efectivo: snapshot si está; si no, deriva del tramo por defecto."""
+
+    def test_usa_snapshot_si_existe(self):
+        cita = {"precio": 12345, "servicio_id": 1, "tramo": "adulto"}
+        assert db.precio_efectivo(cita) == 12345
+
+    def test_deriva_de_tramo_si_falta_snapshot(self):
+        # Sin 'precio': se deriva del servicio 1 + tramo nino (15000 en config).
+        cita = {"servicio_id": 1, "tramo": "nino"}
+        assert db.precio_efectivo(cita) == 15000
+
+    def test_default_adulto_si_no_hay_tramo(self):
+        # Cita vieja sin precio ni tramo → precio del adulto (20000, Consulta).
+        cita = {"servicio_id": 1}
+        assert db.precio_efectivo(cita) == 20000
+
+    def test_precio_cero_se_trata_como_faltante(self):
+        cita = {"precio": 0, "servicio_id": 2, "tramo": "adulto"}
+        assert db.precio_efectivo(cita) == 18000  # Seguimiento adulto
+
+
+class TestFacturacionSinSnapshot:
+    """Regresión: una completada sin `precio` snapshot igual factura (derivada
+    del tramo por defecto). Antes sumaba 0 → '$ recaudados' nunca subía."""
+
+    def test_completada_sin_precio_cuenta_por_tramo(self):
+        cliente = db.get_or_create_cliente("telegram", "fact_legacy", "Lega")
+        cita = db.crear_cita(cliente["id"], 1, 1, _fecha(1), "10:00")
+        # Simula una cita vieja: borra el snapshot de precio.
+        table = db.get_table()
+        table.update_item(
+            Key={"PK": cita["PK"], "SK": cita["SK"]},
+            UpdateExpression="REMOVE precio",
+        )
+        db.marcar_estado_cita(cita["PK"], cita["SK"], "completada")
+        r = db.resumen_citas_rango(_fecha(7), _fecha(0))
+        # Consulta inicial adulto = 20000, derivado del tramo aunque no haya snapshot.
+        assert r["facturacion"] == 20000
+        assert r["ingresos_por_servicio"]["Consulta inicial"] == 20000
+
+
 # ---------------------------------------------------------------------------
 # Comando admin /reporte
 # ---------------------------------------------------------------------------
