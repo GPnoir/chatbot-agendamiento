@@ -158,6 +158,7 @@ async def admin_agenda(
 
     # Enriquecer con datos del cliente
     clientes_cache = {}
+    precios_map = db.get_precios_por_servicio()
     result = []
     for c in sorted(all_citas, key=lambda x: (x["fecha"], x["hora"])):
         cid = c.get("cliente_id", "")
@@ -174,6 +175,12 @@ async def admin_agenda(
         item["cliente_nombre"] = cli.get("nombre", "")
         item["cliente_canal"] = cli.get("canal", "")
         item["cliente_contacto"] = cli.get("canal_user_id", "")
+        # Precio efectivo: snapshot si existe, si no se deriva del tramo (por
+        # defecto 'adulto') para que el detalle nunca quede en '-'.
+        ep = db.precio_efectivo(c, precios_map)
+        if ep is not None:
+            item["precio"] = ep
+        item.setdefault("tramo", db.TRAMO_DEFAULT)
         result.append(item)
 
     return {"fechas": fechas, "total": len(result), "citas": result}
@@ -739,7 +746,7 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--ink);min-height
 function esc(s){var d=document.createElement("div");d.appendChild(document.createTextNode(s==null?"":String(s)));return d.innerHTML}
 function $(id){return document.getElementById(id)}
 function base(){return location.pathname.replace(/[/]admin[/]panel[/]?$/,"")}
-function fmt(d){return d.toISOString().slice(0,10)}
+function fmt(d){return d.getFullYear()+"-"+("0"+(d.getMonth()+1)).slice(-2)+"-"+("0"+d.getDate()).slice(-2)}
 function fmtCorto(d){return ("0"+d.getDate()).slice(-2)+"/"+("0"+(d.getMonth()+1)).slice(-2)}
 function lunes(d){var r=new Date(d);var day=r.getDay();r.setDate(r.getDate()-((day+6)%7));return r}
 
