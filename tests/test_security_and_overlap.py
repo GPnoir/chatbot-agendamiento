@@ -315,6 +315,33 @@ class TestAdminPanelAuth:
         # New pattern: Authorization header in fetch
         assert "Authorization" in html
 
+    def test_panel_inline_script_is_valid_js(self, lambda_client):
+        """The panel's inline <script> must parse as valid JavaScript.
+
+        Regresión: un único error de sintaxis en el bloque inline tumba TODO el
+        script (las funciones quedan sin definir: `doLogin is not defined`), así
+        que el login deja de funcionar sin que ningún test Python lo note. Aquí
+        validamos el JS servido con `node --check`. Se saltea si node no está
+        (CI sí lo tiene: corre Playwright).
+        """
+        import re
+        import shutil
+        import subprocess
+        import tempfile
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node no disponible para validar el JS del panel")
+
+        html = lambda_client.get("/admin/panel").text
+        m = re.search(r"<script>(.*?)</script>", html, re.S)
+        assert m, "el panel debe tener un bloque <script>"
+        with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as f:
+            f.write(m.group(1))
+            js_path = f.name
+        result = subprocess.run([node, "--check", js_path], capture_output=True, text=True)
+        assert result.returncode == 0, f"JS del panel inválido:\n{result.stderr}"
+
 
 class TestRateLimiter:
     def test_permite_hasta_limite(self):
