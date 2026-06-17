@@ -284,6 +284,14 @@ class TestAdminPanelAuth:
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
 
+    def test_panel_declara_favicon_inline(self, lambda_client):
+        """El panel declara un favicon inline (data URI) para que el navegador no
+        pida /favicon.ico — esa ruta no existe en API Gateway y devuelve 403.
+        """
+        html = lambda_client.get("/admin/panel").text
+        assert 'rel="icon"' in html
+        assert "data:image/svg+xml" in html
+
     def test_panel_contains_no_appointment_data(self, lambda_client):
         """Panel HTML must not contain server-rendered appointment records.
 
