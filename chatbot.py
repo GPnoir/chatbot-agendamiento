@@ -15,6 +15,7 @@ BOOKING_NAME = "BOOKING_NAME"
 BOOKING_CONFIRM = "BOOKING_CONFIRM"
 CANCEL_SELECT = "CANCEL_SELECT"
 CANCEL_CONFIRM = "CANCEL_CONFIRM"
+REBOOK_OFFER = "REBOOK_OFFER"
 MODIFY_SELECT = "MODIFY_SELECT"
 MODIFY_DATE = "MODIFY_DATE"
 MODIFY_TIME = "MODIFY_TIME"
@@ -66,6 +67,8 @@ def handle_message(canal: str, canal_user_id: str, text: str) -> str:
         return _handle_cancel_select(session, text)
     elif state == CANCEL_CONFIRM:
         return _handle_cancel_confirm(session, text)
+    elif state == REBOOK_OFFER:
+        return _handle_rebook_offer(session, text)
     elif state == MODIFY_SELECT:
         return _handle_modify_select(session, text)
     elif state == MODIFY_DATE:
@@ -263,16 +266,70 @@ def _handle_cancel_select(session, text):
     return f"¿Cancelar cita de {cita['servicio_nombre']} el {cita['fecha']} a las {cita['hora']}? (si/no)"
 
 
+_DIAS_LARGO = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+
+
 def _handle_cancel_confirm(session, text):
     if text.lower() in ("si", "sí", "s", "1"):
         cita = session["data"]["cita_seleccionada"]
         db.cancelar_cita(cita["id"])
+        # Reagendamiento inteligente (#11): ofrecer la próxima hora libre.
+        oferta = _ofrecer_reagendar(session, cita)
+        if oferta:
+            return oferta
         session["state"] = IDLE
         session["data"] = {}
         return MENSAJES["cita_cancelada"].format(fecha=cita["fecha"], hora=cita["hora"]) + "\n\nEscribe *menu* para volver."
     session["state"] = IDLE
     session["data"] = {}
     return "Cancelación abortada. Escribe *menu* para volver."
+
+
+def _ofrecer_reagendar(session, cita):
+    """Tras cancelar, busca el próximo slot del mismo servicio/profesional y deja
+    la sesión en REBOOK_OFFER. Devuelve el mensaje de oferta, o None si no se
+    pudo resolver el servicio o no hay disponibilidad (cae a cancelación normal)."""
+    serv = next((s for s in db.get_servicios() if s["id"] == cita["servicio_id"]), None)
+    if serv is None:
+        return None
+    slot = db.get_proximo_slot(cita["profesional_id"], serv["duracion_min"])
+    if not slot:
+        return None
+    fecha, hora = slot
+    session["data"] = {"rebook": {
+        "cliente_id": cita["cliente_id"],
+        "servicio_id": cita["servicio_id"],
+        "servicio_nombre": serv["nombre"],
+        "profesional_id": cita["profesional_id"],
+        "profesional_nombre": cita.get("profesional_nombre", ""),
+        "fecha": fecha.isoformat(),
+        "hora": hora,
+    }}
+    session["state"] = REBOOK_OFFER
+    return MENSAJES["reagendar_oferta"].format(
+        fecha_orig=cita["fecha"], hora_orig=cita["hora"], servicio=serv["nombre"],
+        dia=_DIAS_LARGO[fecha.weekday()], fecha=fecha.strftime("%d/%m/%Y"), hora=hora,
+    )
+
+
+def _handle_rebook_offer(session, text):
+    rb = session["data"].get("rebook", {})
+    if text.lower() in ("si", "sí", "s", "1"):
+        try:
+            db.crear_cita(rb["cliente_id"], rb["servicio_id"], rb["profesional_id"], rb["fecha"], rb["hora"])
+        except db.SlotNoDisponibleError:
+            session["state"] = IDLE
+            session["data"] = {}
+            return "😕 Ese horario se acaba de ocupar. Escribe *menu* para elegir otro."
+        session["state"] = IDLE
+        session["data"] = {}
+        fecha = date.fromisoformat(rb["fecha"])
+        return MENSAJES["reagendar_confirmada"].format(
+            dia=_DIAS_LARGO[fecha.weekday()], fecha=fecha.strftime("%d/%m/%Y"), hora=rb["hora"],
+        )
+    session["state"] = IDLE
+    session["data"] = {}
+    return MENSAJES["reagendar_rechazada"]
 
 
 def _handle_modify_select(session, text):

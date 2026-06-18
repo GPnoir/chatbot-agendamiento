@@ -93,6 +93,9 @@ MENSAJES = {
     "despedida": "¡Gracias! 🌿 Te esperamos.",
     "cita_confirmada": "✅ Cita agendada:\n📋 {servicio}\n👩‍⚕️ {profesional}\n📅 {fecha} a las {hora}",
     "cita_cancelada": "❌ Cita del {fecha} a las {hora} cancelada.",
+    "reagendar_oferta": "❌ Cita del {fecha_orig} a las {hora_orig} cancelada.\n\n📅 La próxima hora libre para {servicio} es {dia} {fecha} a las {hora}.\n¿Quieres tomarla? (si/no)",
+    "reagendar_confirmada": "✅ ¡Listo! Reagendada para {dia} {fecha} a las {hora}.\n\nEscribe *menu* para volver.",
+    "reagendar_rechazada": "Tu cita queda cancelada. Escribe *menu* si quieres agendar otra hora.",
     "error": "No entendí tu respuesta. Por favor elige una opción válida.",
     "error_interno": "🌸 Ups, algo salió mal de mi lado. Escribe *menu* para empezar de nuevo.",
 }

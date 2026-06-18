@@ -192,6 +192,20 @@ def get_fechas_disponibles(profesional_id: int, servicio_duracion: int, dias: in
     return fechas
 
 
+def get_proximo_slot(profesional_id: int, servicio_duracion: int, dias: int = 14):
+    """Primer (date, 'HH:MM') disponible en los próximos `dias` días, o None.
+
+    Espeja database_dynamo.get_proximo_slot (reagendamiento inteligente, #11).
+    """
+    hoy = date.today()
+    for i in range(1, dias + 1):
+        d = hoy + timedelta(days=i)
+        horas = get_horas_disponibles(profesional_id, d, int(servicio_duracion))
+        if horas:
+            return d, horas[0]
+    return None
+
+
 def crear_cita(cliente_id: int, servicio_id: int, profesional_id: int, fecha: str, hora: str) -> dict:
     conn = get_db()
     # Un solo confirmado por horario del profesional: rechaza la doble reserva.
