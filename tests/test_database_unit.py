@@ -142,6 +142,21 @@ class TestHorasDisponibles:
                 return
         pytest.skip("No se encontraron fechas con disponibilidad")
 
+    def test_proximo_slot_es_el_primero_disponible(self, fresh_db):
+        """get_proximo_slot devuelve la primera (fecha, hora) libre (#11)."""
+        profesionales = fresh_db.get_profesionales()
+        if not profesionales:
+            pytest.skip("No hay profesionales")
+        pid = profesionales[0]["id"]
+        slot = fresh_db.get_proximo_slot(pid, 60)
+        assert slot is not None
+        fecha, hora = slot
+        assert fecha > date.today()
+        # Coincide con la primera fecha disponible y su primera hora libre.
+        fechas = fresh_db.get_fechas_disponibles(pid, 60, 14)
+        assert fecha == fechas[0]
+        assert hora == fresh_db.get_horas_disponibles(pid, fecha, 60)[0]
+
 
 class TestCitas:
     def test_crear_cita_retorna_datos(self, fresh_db):
