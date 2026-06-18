@@ -302,6 +302,21 @@ class TestDisponibilidad:
         fechas = db.get_fechas_disponibles(1, Decimal("30"))
         assert fechas  # hay al menos una fecha disponible esta semana
 
+    def test_proximo_slot_devuelve_fecha_y_hora(self):
+        from datetime import date as _date
+
+        slot = db.get_proximo_slot(1, 60)
+        assert slot is not None
+        fecha, hora = slot
+        assert isinstance(fecha, _date)
+        assert fecha > _date.today()  # siempre futuro
+        assert hora in db.get_horas_disponibles(1, fecha, 60)
+
+    def test_proximo_slot_acepta_decimal(self):
+        from decimal import Decimal
+
+        assert db.get_proximo_slot(1, Decimal("30")) is not None
+
 
 # ---------------------------------------------------------------------------
 # Flujo "modificar cita" end-to-end (chatbot_lambda + DynamoDB moto)
@@ -346,6 +361,57 @@ class TestModificarFlujo:
         resp = cb.handle_message(canal, uid, "si")  # confirmar
         assert "reagendada" in resp.lower()
         assert session_store.get_session(uid)["state"] == cb.IDLE
+
+
+class TestReagendarInteligente:
+    """Reagendamiento inteligente (#11): al cancelar, el bot ofrece la próxima
+    hora libre del mismo servicio/profesional y reagenda en un toque."""
+
+    def _crear_cita_futura(self, canal="telegram", uid="moto_rebook"):
+        import chatbot_lambda  # noqa: F401  (asegura misma tabla via fixture)
+
+        cliente = db.get_or_create_cliente(canal, uid, "Paciente Rebook")
+        lunes = _proximo_lunes()
+        serv = next(s for s in db.get_servicios() if "inicial" in s["nombre"].lower())
+        db.crear_cita(cliente["id"], serv["id"], 1, lunes.isoformat(), "10:00")
+        return canal, uid, cliente
+
+    def test_cancelar_ofrece_proxima_hora(self):
+        import chatbot_lambda as cb
+
+        canal, uid, _ = self._crear_cita_futura(uid="moto_rebook_offer")
+        cb.handle_message(canal, uid, "menu")
+        cb.handle_message(canal, uid, "3")  # cancelar
+        cb.handle_message(canal, uid, "1")  # seleccionar la cita
+        resp = cb.handle_message(canal, uid, "si")  # confirmar cancelación
+        assert "cancelada" in resp.lower()
+        assert "próxima hora libre" in resp.lower()
+        assert session_store.get_session(uid)["state"] == cb.REBOOK_OFFER
+
+    def test_aceptar_oferta_reagenda(self):
+        import chatbot_lambda as cb
+
+        canal, uid, cliente = self._crear_cita_futura(uid="moto_rebook_yes")
+        cb.handle_message(canal, uid, "menu")
+        cb.handle_message(canal, uid, "3")
+        cb.handle_message(canal, uid, "1")
+        cb.handle_message(canal, uid, "si")  # cancela → oferta
+        resp = cb.handle_message(canal, uid, "si")  # toma la hora ofrecida
+        assert "reagendada" in resp.lower()
+        assert session_store.get_session(uid)["state"] == cb.IDLE
+        assert len(db.get_citas_cliente(cliente["id"])) == 1  # la nueva cita
+
+    def test_rechazar_oferta_no_reagenda(self):
+        import chatbot_lambda as cb
+
+        canal, uid, cliente = self._crear_cita_futura(uid="moto_rebook_no")
+        cb.handle_message(canal, uid, "menu")
+        cb.handle_message(canal, uid, "3")
+        cb.handle_message(canal, uid, "1")
+        cb.handle_message(canal, uid, "si")   # cancela → oferta
+        resp = cb.handle_message(canal, uid, "no")  # rechaza reagendar
+        assert session_store.get_session(uid)["state"] == cb.IDLE
+        assert len(db.get_citas_cliente(cliente["id"])) == 0
 
 
 class TestBookingConfirmSlotOcupado:

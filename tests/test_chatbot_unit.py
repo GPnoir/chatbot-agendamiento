@@ -165,7 +165,7 @@ class TestCancelFlow:
         assert "No tienes citas" in resp
 
     def test_cancelar_cita_flow_completo(self, fresh_db):
-        """Flujo feliz: seleccionar cita → confirmar cancelación."""
+        """Flujo feliz: seleccionar cita → confirmar → se ofrece reagendar (#11)."""
         self._crear_cita_test()
         resp = chatbot.handle_message("test", TEST_USER, "3")
         assert "Cuál cita" in resp or "1️⃣" in resp
@@ -175,9 +175,11 @@ class TestCancelFlow:
         assert "Cancelar" in resp
         assert chatbot._get_session(TEST_USER)["state"] == chatbot.CANCEL_CONFIRM
 
+        # Tras confirmar, la cita queda cancelada y se ofrece la próxima hora libre.
         resp = chatbot.handle_message("test", TEST_USER, "si")
         assert "cancelada" in resp
-        assert chatbot._get_session(TEST_USER)["state"] == chatbot.IDLE
+        assert "próxima hora libre" in resp
+        assert chatbot._get_session(TEST_USER)["state"] == chatbot.REBOOK_OFFER
 
     def test_cancelar_actualiza_bd(self, fresh_db):
         """Cancelar cita cambia estado en BD."""
@@ -209,6 +211,32 @@ class TestCancelFlow:
         chatbot.handle_message("test", TEST_USER, "3")
         resp = chatbot.handle_message("test", TEST_USER, "99")
         assert resp == MENSAJES["error"]
+
+    def test_reagendar_aceptado_crea_nueva_cita(self, fresh_db):
+        """Reagendamiento inteligente (#11): aceptar la oferta agenda la nueva hora."""
+        self._crear_cita_test()
+        chatbot.handle_message("test", TEST_USER, "3")
+        chatbot.handle_message("test", TEST_USER, "1")
+        oferta = chatbot.handle_message("test", TEST_USER, "si")  # confirma cancelación
+        assert chatbot._get_session(TEST_USER)["state"] == chatbot.REBOOK_OFFER
+
+        resp = chatbot.handle_message("test", TEST_USER, "si")  # toma la hora ofrecida
+        assert "Reagendada" in resp
+        assert chatbot._get_session(TEST_USER)["state"] == chatbot.IDLE
+        cliente = db_module.get_or_create_cliente("test", TEST_USER)
+        citas = db_module.get_citas_cliente(cliente["id"])
+        assert len(citas) == 1  # la nueva cita reagendada
+
+    def test_reagendar_rechazado_no_crea_cita(self, fresh_db):
+        """Rechazar la oferta deja la cita cancelada, sin reagendar."""
+        self._crear_cita_test()
+        chatbot.handle_message("test", TEST_USER, "3")
+        chatbot.handle_message("test", TEST_USER, "1")
+        chatbot.handle_message("test", TEST_USER, "si")  # confirma cancelación → oferta
+        resp = chatbot.handle_message("test", TEST_USER, "no")  # rechaza reagendar
+        assert chatbot._get_session(TEST_USER)["state"] == chatbot.IDLE
+        cliente = db_module.get_or_create_cliente("test", TEST_USER)
+        assert len(db_module.get_citas_cliente(cliente["id"])) == 0
 
     def _crear_cita_test(self):
         """Helper: agenda una cita de prueba."""
