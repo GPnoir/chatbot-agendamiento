@@ -119,6 +119,7 @@ All initial gaps resolved (June 2026):
 5. ~~Weak admin auth~~ → login usuario+contraseña (PBKDF2) + token de sesión firmado HMAC (admin_auth.py); ADMIN_API_KEY queda como break-glass para automatización
 6. ~~No structured logging~~ → aws-lambda-powertools (observability.py)
 7. ~~No alarms~~ → CloudWatch alarms in template.yaml + optional AlarmEmail
+8. ~~No cost guardrails~~ → API GW throttling (20 rps / 40 burst) + ReservedConcurrentExecutions por Lambda + billing alarm (`MonthlyBudgetUsd`, default 10 USD); contrato en test_template_guardrails_unit.py
 
 ## Open Issues (GitHub)
 
