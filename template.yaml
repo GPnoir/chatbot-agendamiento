@@ -3,6 +3,16 @@ Transform: AWS::Serverless-2016-10-31
 Description: Chatbot de Agendamiento - Lambda + API Gateway + DynamoDB
 
 Globals:
+  # Throttling de todo el stage: un flood (incluso con firma inválida) invoca
+  # la Lambda una vez por request; este límite lo corta en API Gateway antes
+  # de generar costo. Techo holgado para el tráfico real: webhooks de
+  # Telegram/WhatsApp + el panel de una sola terapeuta.
+  Api:
+    MethodSettings:
+      - ResourcePath: '/*'
+        HttpMethod: '*'
+        ThrottlingRateLimit: 20
+        ThrottlingBurstLimit: 40
   Function:
     Timeout: 15
     MemorySize: 256
@@ -77,6 +87,14 @@ Parameters:
       Optional email address for alarm notifications. When empty, alarms are
       created but no notifications are sent (still visible in CloudWatch console
       and dashboards).
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    Description: >
+      Umbral (USD) de la alarma de gasto estimado mensual de la cuenta
+      (AlarmBillingEstimatedCharges). El stack completo cuesta centavos/mes;
+      superar este umbral indica un ataque, un loop o un recurso olvidado.
   # ── Google Calendar (issue #14) — opt-in, OFF by default ──────────
   GoogleCalendarEnabled:
     Type: String
@@ -149,6 +167,9 @@ Resources:
       FunctionName: chatbot-agendamiento
       Handler: lambda_handler.handler
       CodeUri: .
+      # Techo de concurrencia = techo de costo ante un flood que pase el
+      # throttling del API Gateway. 10 concurrentes sobra para este tráfico.
+      ReservedConcurrentExecutions: 10
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref ChatbotTable
@@ -236,6 +257,8 @@ Resources:
       FunctionName: chatbot-reminder
       Handler: reminder_handler.handler
       CodeUri: .
+      # Corre 1 vez/hora: con 1 alcanza y evita ejecuciones solapadas.
+      ReservedConcurrentExecutions: 1
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref ChatbotTable
@@ -251,6 +274,8 @@ Resources:
       FunctionName: chatbot-attendance-prompt
       Handler: attendance_prompt.handler
       CodeUri: .
+      # Corre 1 vez/hora: con 1 alcanza y evita ejecuciones solapadas.
+      ReservedConcurrentExecutions: 1
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref ChatbotTable
@@ -448,6 +473,34 @@ Resources:
       AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
       OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
 
+  # Billing: gasto estimado mensual de la CUENTA (no solo el stack). Es el
+  # aviso de última línea si algo escapa al throttling/concurrencia (ataque,
+  # loop de mensajes salientes, recurso olvidado).
+  # NOTA: la métrica AWS/Billing solo existe en us-east-1 (donde corre este
+  # stack) y requiere tener habilitado "Receive Billing Alerts" en
+  # Billing Preferences de la cuenta; sin eso la alarma queda en
+  # INSUFFICIENT_DATA (notBreaching, no molesta).
+  AlarmBillingEstimatedCharges:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-billing-estimated-charges'
+      AlarmDescription: !Sub 'Estimated AWS account charges exceeded ${MonthlyBudgetUsd} USD this month.'
+      Namespace: AWS/Billing
+      MetricName: EstimatedCharges
+      Dimensions:
+        - Name: Currency
+          Value: USD
+      # EstimatedCharges es un acumulado mensual: el máximo de las últimas 6h
+      # es el valor real más reciente (la métrica se publica cada pocas horas).
+      Statistic: Maximum
+      Period: 21600
+      EvaluationPeriods: 1
+      Threshold: !Ref MonthlyBudgetUsd
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], []]
+
 Outputs:
   ApiUrl:
     Description: URL base del API Gateway
@@ -492,3 +545,7 @@ Outputs:
   AlarmApiGateway4XXArn:
     Description: ARN of the API Gateway 4XX error alarm
     Value: !GetAtt AlarmApiGateway4XX.Arn
+
+  AlarmBillingEstimatedChargesArn:
+    Description: ARN of the account estimated-charges billing alarm
+    Value: !GetAtt AlarmBillingEstimatedCharges.Arn
