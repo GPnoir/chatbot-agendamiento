@@ -403,6 +403,21 @@ async def admin_enviar_mensaje(request: Request):
                 await _send_whatsapp_buttons(destino, texto, [("2", "Reagendar"), ("3", "Cancelar")])
             else:
                 await _send_whatsapp(destino, texto)
+    except WhatsAppSendError as e:
+        # Fuera de la ventana de 24h: no es un fallo del server, es una regla de
+        # Meta. Se lo explicamos a la terapeuta para que sepa qué hacer.
+        if e.code in WA_OUTSIDE_WINDOW_CODES:
+            logger.info("admin enviar mensaje: fuera de ventana 24h", extra={"code": e.code})
+            return JSONResponse(status_code=409, content={
+                "error": "outside_window",
+                "message": (
+                    "El paciente no escribió en las últimas 24 h. WhatsApp no "
+                    "permite enviarle texto libre fuera de esa ventana; pedile "
+                    "que responda cualquier mensaje para reabrir la conversación."
+                ),
+            })
+        logger.error("admin enviar mensaje: whatsapp rechazado", extra={"code": e.code})
+        return JSONResponse(status_code=502, content={"error": "send failed"})
     except Exception as e:
         logger.error("admin enviar mensaje: send error", extra={"error": str(e)})
         return JSONResponse(status_code=502, content={"error": "send failed"})
@@ -979,7 +994,7 @@ async function enviarMensaje(){
   if(r.status===401||r.status===403){onAuthLost();return}
   btn.disabled=false;btn.textContent="Enviar por el bot";
   if(r.ok){ta.value="";if($("msg-acciones"))$("msg-acciones").checked=false;_msgFb("Mensaje enviado.","ok")}
-  else{_msgFb("No se pudo enviar.","err")}
+  else{var d={};try{d=await r.json()}catch(e){}_msgFb(d.message||"No se pudo enviar.","err")}
 }
 function semana(dir){offset+=dir;renderAgenda()}
 
@@ -1121,11 +1136,42 @@ def _verify_whatsapp_signature(payload: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+class WhatsAppSendError(Exception):
+    """Meta rechazó el envío. `code` es el código de error de Meta (p. ej.
+    131047 = fuera de la ventana de 24h), útil para dar un mensaje claro."""
+
+    def __init__(self, message: str, code: int | None = None):
+        super().__init__(message)
+        self.code = code
+
+
+# Códigos de Meta que significan "la ventana de 24h está cerrada": solo se
+# puede contactar al paciente con un template aprobado, no con texto libre.
+WA_OUTSIDE_WINDOW_CODES = {131047, 131051, 470}
+
+
+def _check_wa_response(resp) -> None:
+    """Lanza WhatsAppSendError si Meta no aceptó el mensaje.
+
+    Solo propaga el code/message de Meta (no traen secretos); nunca el token
+    ni el payload.
+    """
+    if resp.status_code >= 400:
+        try:
+            err = resp.json().get("error", {})
+            code = err.get("code")
+            msg = err.get("message")
+        except Exception:
+            code, msg = None, None
+        raise WhatsAppSendError(f"Meta {resp.status_code}: code={code} {msg}", code=code)
+
+
 async def _send_whatsapp(to: str, text: str):
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}}
     async with httpx.AsyncClient() as client:
-        await client.post(META_API_URL, json=payload, headers=headers)
+        resp = await client.post(META_API_URL, json=payload, headers=headers)
+    _check_wa_response(resp)
 
 
 async def _send_whatsapp_buttons(to: str, text: str, buttons: list):
@@ -1147,7 +1193,8 @@ async def _send_whatsapp_buttons(to: str, text: str, buttons: list):
         },
     }
     async with httpx.AsyncClient() as client:
-        await client.post(META_API_URL, json=payload, headers=headers)
+        resp = await client.post(META_API_URL, json=payload, headers=headers)
+    _check_wa_response(resp)
 
 
 async def _send_telegram(chat_id: int, text: str, reply_markup: dict | None = None):

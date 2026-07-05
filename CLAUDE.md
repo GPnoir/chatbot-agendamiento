@@ -19,6 +19,9 @@ Chatbot multicanal (Telegram + WhatsApp) para agendamiento de citas. Desplegado 
 - `channels/base.py` — abstract channel interface
 - `channels/telegram_bot.py` — Telegram implementation
 - `channels/whatsapp_bot.py` — WhatsApp implementation
+- `reminder_handler.py` — Lambda programada (1/h): recordatorio ~24h antes.
+  WhatsApp respeta la ventana de 24h de Meta — fuera de ella solo pasan
+  templates aprobados (`WHATSAPP_REMINDER_TEMPLATE`); ver docs/whatsapp-templates.md
 - `chatbot.py` — business logic (servicios, horarios, citas)
 - `chatbot_lambda.py` — Lambda-specific handler
 - `lambda_handler.py` — API Gateway routing + **panel admin web** (`/admin/*`)
