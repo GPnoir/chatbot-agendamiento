@@ -92,3 +92,66 @@ class TestMensajeEndpoint:
                                   json={"cliente_id": cli["id"], "texto": "Hola"}, headers=AUTH)
         assert r.status_code == 200
         send.assert_awaited_once()
+
+
+class TestFueraDeVentana24h:
+    """WhatsApp rechaza texto libre fuera de la ventana de 24h (error 131047).
+    El panel debe recibir un mensaje claro, no un fallo genérico silencioso."""
+
+    def test_whatsapp_fuera_de_ventana_error_claro(self, admin_client):
+        import lambda_handler
+        cli = db.get_or_create_cliente("whatsapp", "5491100000009", "Fer")
+        err = lambda_handler.WhatsAppSendError("Meta 400: code=131047", code=131047)
+        with patch.object(lambda_handler, "_send_whatsapp", new=AsyncMock(side_effect=err)):
+            r = admin_client.post("/admin/cliente/mensaje",
+                                  json={"cliente_id": cli["id"], "texto": "Hola"}, headers=AUTH)
+        assert r.status_code == 409
+        body = r.json()
+        assert body.get("error") == "outside_window"
+        assert "24" in body.get("message", "")
+
+    def test_whatsapp_error_generico_502(self, admin_client):
+        import lambda_handler
+        cli = db.get_or_create_cliente("whatsapp", "5491100000008", "Gus")
+        err = lambda_handler.WhatsAppSendError("Meta 500: code=131000", code=131000)
+        with patch.object(lambda_handler, "_send_whatsapp", new=AsyncMock(side_effect=err)):
+            r = admin_client.post("/admin/cliente/mensaje",
+                                  json={"cliente_id": cli["id"], "texto": "Hola"}, headers=AUTH)
+        assert r.status_code == 502
+
+
+class TestCheckWaResponse:
+    def test_lanza_con_codigo_de_meta(self):
+        import lambda_handler
+
+        class _R:
+            status_code = 400
+            def json(self):
+                return {"error": {"code": 131047, "message": "re-engagement"}}
+
+        with pytest.raises(lambda_handler.WhatsAppSendError) as ei:
+            lambda_handler._check_wa_response(_R())
+        assert ei.value.code == 131047
+
+    def test_ok_no_lanza(self):
+        import lambda_handler
+
+        class _R:
+            status_code = 200
+            def json(self):
+                return {"messages": [{"id": "wamid.Z"}]}
+
+        lambda_handler._check_wa_response(_R())  # no debe lanzar
+
+    def test_no_filtra_el_token(self):
+        import lambda_handler
+
+        class _R:
+            status_code = 401
+            def json(self):
+                return {"error": {"code": 190, "message": "bad token"}}
+
+        with patch.object(lambda_handler, "WHATSAPP_TOKEN", "SECRET_TOKEN_ABC"):
+            with pytest.raises(lambda_handler.WhatsAppSendError) as ei:
+                lambda_handler._check_wa_response(_R())
+        assert "SECRET_TOKEN_ABC" not in str(ei.value)

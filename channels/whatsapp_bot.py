@@ -47,7 +47,17 @@ async def send_message(to: str, text: str):
         "text": {"body": text},
     }
     async with httpx.AsyncClient() as client:
-        await client.post(META_API_URL, json=payload, headers=headers)
+        resp = await client.post(META_API_URL, json=payload, headers=headers)
+    # Un envío rechazado por Meta (>=400) hoy pasaba en silencio. Lo logueamos
+    # sin filtrar el token ni el payload. Estas respuestas del bot van dentro
+    # de la ventana de 24h, así que un 131047 acá sería raro pero visible.
+    if resp.status_code >= 400:
+        try:
+            err = resp.json().get("error", {})
+            detalle = f"code={err.get('code')}"
+        except Exception:
+            detalle = "sin cuerpo"
+        logger.error("WhatsApp send rechazado por Meta", extra={"status": resp.status_code, "meta": detalle})
 
 
 @router.get("/webhook")

@@ -10,6 +10,19 @@ TABLE_NAME = os.getenv("DYNAMODB_TABLE", "chatbot-agendamiento")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+# Fuera de la ventana de 24h de Meta, el texto libre se rechaza (error 131047);
+# solo pasan templates aprobados. El recordatorio es proactivo, así que casi
+# siempre está fuera de la ventana. Vacío ⇒ texto libre (dev/local o mientras
+# el template no esté aprobado). Ver docs/whatsapp-templates.md.
+WHATSAPP_REMINDER_TEMPLATE = os.getenv("WHATSAPP_REMINDER_TEMPLATE", "")
+WHATSAPP_TEMPLATE_LANG = os.getenv("WHATSAPP_TEMPLATE_LANG", "es")
+
+
+class WhatsAppSendError(Exception):
+    """Meta rechazó el envío (p. ej. fuera de la ventana de 24h, token inválido).
+
+    Se usa para NO marcar el recordatorio como enviado cuando en realidad rebotó.
+    """
 
 
 def get_table():
@@ -57,11 +70,52 @@ def send_telegram(chat_id, text):
     httpx.post(url, json={"chat_id": int(chat_id), "text": text})
 
 
+def _wa_url():
+    return f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+
+
+def _wa_headers():
+    return {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+
+
+def _check_meta_response(resp) -> None:
+    """Lanza WhatsAppSendError si Meta no aceptó el mensaje.
+
+    Meta responde 2xx con {"messages":[...]} al aceptar, o >=400 con
+    {"error":{"code","message"}} al rechazar. Solo se propaga el code/message
+    de Meta (no traen secretos); nunca se incluye el token ni el payload.
+    """
+    if resp.status_code >= 400:
+        try:
+            err = resp.json().get("error", {})
+            detalle = f"code={err.get('code')} {err.get('message')}"
+        except Exception:
+            detalle = "sin cuerpo de error"
+        raise WhatsAppSendError(f"Meta {resp.status_code}: {detalle}")
+
+
 def send_whatsapp(to, text):
-    url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}}
-    httpx.post(url, json=payload, headers=headers)
+    resp = httpx.post(_wa_url(), json=payload, headers=_wa_headers(), timeout=10.0)
+    _check_meta_response(resp)
+
+
+def send_whatsapp_template(to, template, lang, params):
+    """Envía un template aprobado. `params` van al componente body en orden ({{1}}, {{2}}...)."""
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "template",
+        "template": {
+            "name": template,
+            "language": {"code": lang},
+            "components": [
+                {"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}
+            ],
+        },
+    }
+    resp = httpx.post(_wa_url(), json=payload, headers=_wa_headers(), timeout=10.0)
+    _check_meta_response(resp)
 
 
 def marcar_recordatorio_enviado(pk, sk):
@@ -114,7 +168,19 @@ def handler(event, context):
             if canal == "telegram":
                 send_telegram(canal_user_id, texto)
             elif canal == "whatsapp":
-                send_whatsapp(canal_user_id, texto)
+                if WHATSAPP_REMINDER_TEMPLATE:
+                    # Fuera de la ventana de 24h (lo normal en un recordatorio
+                    # proactivo) Meta solo acepta templates. Params: servicio y
+                    # cuándo ({{1}}, {{2}}) — ver docs/whatsapp-templates.md.
+                    cuando = f"{cita['fecha']} a las {cita['hora']}"
+                    send_whatsapp_template(
+                        canal_user_id,
+                        WHATSAPP_REMINDER_TEMPLATE,
+                        WHATSAPP_TEMPLATE_LANG,
+                        [cita.get("servicio_nombre", "Consulta"), cuando],
+                    )
+                else:
+                    send_whatsapp(canal_user_id, texto)
             marcar_recordatorio_enviado(cita["PK"], cita["SK"])
             # Poner al usuario en estado de confirmación
             set_confirm_session(canal_user_id, cita)

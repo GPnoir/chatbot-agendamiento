@@ -17,6 +17,8 @@ Globals:
         WHATSAPP_PHONE_NUMBER_ID: !Ref WhatsAppPhoneNumberId
         WHATSAPP_VERIFY_TOKEN: !Ref WhatsAppVerifyToken
         WHATSAPP_APP_SECRET: !Ref WhatsAppAppSecret
+        WHATSAPP_REMINDER_TEMPLATE: !Ref WhatsAppReminderTemplate
+        WHATSAPP_TEMPLATE_LANG: !Ref WhatsAppTemplateLang
         ADMIN_API_KEY: !Ref AdminApiKey
         ADMIN_USERNAME: !Ref AdminUsername
         ADMIN_PASSWORD_HASH: !Ref AdminPasswordHash
@@ -50,6 +52,17 @@ Parameters:
     Type: String
     NoEcho: true
     Default: ''
+  WhatsAppReminderTemplate:
+    Type: String
+    Default: ''
+    Description: >
+      Nombre del template utility aprobado en Meta para el recordatorio de cita
+      (p. ej. recordatorio_cita). Vacío ⇒ el recordatorio usa texto libre, que
+      Meta rechaza fuera de la ventana de 24h. Ver docs/whatsapp-templates.md.
+  WhatsAppTemplateLang:
+    Type: String
+    Default: 'es'
+    Description: Código de idioma del template aprobado (p. ej. es, es_CL).
   AdminApiKey:
     Type: String
     NoEcho: true

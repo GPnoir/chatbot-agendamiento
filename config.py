@@ -31,6 +31,12 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
 WHATSAPP_APP_SECRET = os.getenv("WHATSAPP_APP_SECRET", "")
+# Plantilla (template) utility aprobada en Meta para el recordatorio de cita.
+# Fuera de la ventana de 24h Meta solo acepta templates; el recordatorio es
+# proactivo, así que sin esto Meta lo rechaza. Vacío ⇒ fallback a texto libre
+# (dev/local, o mientras el template no esté aprobado). Ver docs/whatsapp-templates.md.
+WHATSAPP_REMINDER_TEMPLATE = os.getenv("WHATSAPP_REMINDER_TEMPLATE", "")
+WHATSAPP_TEMPLATE_LANG = os.getenv("WHATSAPP_TEMPLATE_LANG", "es")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://localhost:8000")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
